@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="ro"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Semnare Paludariu</title>
+<style>
+:root{--b1:#1f3d2c;--b2:#0b1610;--c:#13251b;--b:rgba(160,210,170,.18);--t:#e8f1e7;--m:#93a99a;--gr:#86cf8e;--on:#0c1a12;--ct:#f2b45a;--bad:#ef6f5e}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(120% 60% at 50% 0,var(--b1),var(--b2) 60%) fixed;color:var(--t);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:720px;margin:0 auto;padding:24px 16px 48px}
+h1{font:600 28px/1.2 Georgia,serif;margin:0}
+h2{font:600 19px/1.3 Georgia,serif;margin:0 0 6px}
+.sub{color:var(--m);margin:6px 0 18px}
+.card{background:rgba(19,37,27,.92);border:1px solid var(--b);border-radius:20px 20px 20px 8px;padding:16px;margin:14px 0}
+.card p{color:var(--m);margin:6px 0}
+.n{display:inline-grid;place-items:center;width:26px;height:26px;border-radius:50%;background:var(--gr);color:var(--on);font-weight:700;font-size:14px;margin-right:8px}
+button,label.btn{display:inline-block;border:0;border-radius:99px;padding:12px 18px;margin:8px 8px 0 0;background:var(--gr);color:var(--on);font:600 15px system-ui,sans-serif;cursor:pointer}
+button.sec,label.btn.sec{background:transparent;border:1px solid var(--b);color:var(--t)}
+button:disabled{opacity:.45;cursor:default}
+code,.mono{font:13px ui-monospace,Consolas,monospace;word-break:break-all}
+.box{background:rgba(0,0,0,.28);border:1px solid var(--b);border-radius:12px;padding:10px 12px;margin-top:10px}
+.ok{color:var(--gr)}.bad{color:var(--bad)}.warn{color:var(--ct)}
+.note{border-left:3px solid var(--ct);padding:8px 12px;background:rgba(242,180,90,.07);border-radius:0 10px 10px 0;color:#efe6d4;font-size:14px;margin-top:10px}
+ol{color:var(--m);padding-left:20px;margin:6px 0}
+</style></head><body><main>
+<h1>Semnarea actualizărilor</h1>
+<p class="sub">Placa instalează de pe GitHub doar fișiere semnate cu cheia ta. Pagina asta face cheia și semnătura direct în browser: nimic nu pleacă de pe calculatorul tău.</p>
+
+<div class="card">
+ <h2><span class="n">1</span>Cheia ta de semnare</h2>
+ <p>O faci <b>o singură dată</b>. Cheia privată o păstrezi doar tu, într-un loc sigur, cu o copie de rezervă: fără ea nu mai poți semna versiuni noi.</p>
+ <button id="gen">Fă o cheie nouă</button>
+ <label class="btn sec">Am deja cheia (fișierul .json)<input type="file" id="ldKey" accept=".json,application/json" hidden></label>
+ <div id="keyOut"></div>
+</div>
+
+<div class="card">
+ <h2><span class="n">2</span>Semnează fișierul plăcii</h2>
+ <p>În Arduino IDE: <b>Sketch → Export Compiled Binary</b>. Alegi aici <b>paludariu.ino.bin</b> din folderul <code>build</code>.</p>
+ <label class="btn sec">Alege paludariu.ino.bin<input type="file" id="bin" accept=".bin" hidden></label>
+ <button id="sign" disabled>Semnează</button>
+ <div id="signOut"></div>
+</div>
+
+<div class="card">
+ <h2><span class="n">3</span>Publică pe GitHub</h2>
+ <ol>
+  <li>Pe GitHub, la depozitul tău: <b>Releases → Draft a new release</b>.</li>
+  <li>La „Choose a tag” scrii versiunea, de exemplu <code>v1.8.1</code>. Trebuie să fie aceeași cu <code>VERSIUNE</code> din paludariu.ino.</li>
+  <li>Atașezi <b>paludariu.ino.bin</b> și <b>paludariu.ino.bin.sig</b>, plus APK-ul aplicației, dacă ai una nouă.</li>
+  <li>Apeși <b>Publish release</b>. În cel mult o zi placa îți spune pe Telegram că are o versiune nouă; o instalezi din pagina ei, cu un buton.</li>
+ </ol>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+let priv=null,pubHex='';
+const hex=b=>[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');
+function b64u(s){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';return Uint8Array.from(atob(s),c=>c.charCodeAt(0))}
+function salveaza(nume,data,tip){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([data],{type:tip}));a.download=nume;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000)}
+function arataCheia(nou){
+ const linie='#define CHEIE_ACTUALIZARE "'+pubHex+'"';
+ $('keyOut').innerHTML=(nou?'<p class="ok">Cheia e gata. S-a descărcat <b>cheie_privata_paludariu.json</b>: mut-o într-un loc sigur și fă-i o copie (de exemplu pe un stick). Nu o pune pe GitHub și nu o trimite nimănui.</p>':'<p class="ok">Cheia e încărcată.</p>')+
+ '<p>Pune rândul ăsta în <b>config.h</b> (în locul celui cu ghilimele goale), apoi urcă o dată codul pe placă:</p><div class="box mono" id="ln">'+linie+'</div><button class="sec" id="cp">Copiază rândul</button>'+
+ '<div class="note">Cheia publică de mai sus nu e secretă: ea doar verifică. Secretă e doar cheia privată din fișierul .json.</div>';
+ $('cp').onclick=()=>{navigator.clipboard.writeText(linie).then(()=>{$('cp').textContent='Copiat'})};
+ $('sign').disabled=!$('bin').files[0];
+}
+$('gen').onclick=async()=>{
+ if(priv&&!confirm('Ai deja o cheie încărcată. Faci una nouă? Plăcile cu cheia veche n-o vor accepta pe cea nouă până nu le pui noul rând în config.h.'))return;
+ const k=await crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'},true,['sign','verify']);
+ priv=k.privateKey;pubHex=hex(await crypto.subtle.exportKey('raw',k.publicKey));
+ const jwk=await crypto.subtle.exportKey('jwk',k.privateKey);jwk.paludariu='cheie privata pentru semnarea actualizarilor - NU o publica';
+ salveaza('cheie_privata_paludariu.json',JSON.stringify(jwk,null,1),'application/json');arataCheia(true)};
+$('ldKey').onchange=async()=>{const f=$('ldKey').files[0];if(!f)return;
+ try{const jwk=JSON.parse(await f.text());if(jwk.kty!=='EC'||jwk.crv!=='P-256'||!jwk.d)throw 0;
+  priv=await crypto.subtle.importKey('jwk',{kty:jwk.kty,crv:jwk.crv,x:jwk.x,y:jwk.y,d:jwk.d,ext:true},{name:'ECDSA',namedCurve:'P-256'},false,['sign']);
+  pubHex='04'+hex(b64u(jwk.x))+hex(b64u(jwk.y));arataCheia(false)}
+ catch(e){$('keyOut').innerHTML='<p class="bad">Fișierul nu e o cheie de semnare Paludariu.</p>'}};
+$('bin').onchange=()=>{const f=$('bin').files[0];$('sign').disabled=!(f&&priv);
+ $('signOut').innerHTML=f?'<p>Ales: <b>'+f.name+'</b>, '+Math.round(f.size/1024)+' KB.'+(priv?'':' <span class="warn">Încarcă întâi cheia (pasul 1).</span>')+'</p>':''};
+$('sign').onclick=async()=>{const f=$('bin').files[0];if(!f||!priv)return;
+ const data=await f.arrayBuffer(),u=new Uint8Array(data);
+ if(u[0]!==0xE9){$('signOut').innerHTML='<p class="bad">Fișierul nu pare cod de ESP32 (alege paludariu.ino.bin, nu cel cu „merged” sau „bootloader”).</p>';return}
+ const sig=await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},priv,data);
+ const h=hex(await crypto.subtle.digest('SHA-256',data));
+ salveaza(f.name+'.sig',hex(sig),'text/plain');
+ $('signOut').innerHTML='<p class="ok">Gata. S-a descărcat <b>'+f.name+'.sig</b>. Îl atașezi la Release împreună cu <b>'+f.name+'</b>.</p><div class="box mono">SHA-256: '+h+'</div>'};
+</script></main></body></html>

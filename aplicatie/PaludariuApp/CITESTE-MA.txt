@@ -1,0 +1,60 @@
+APLICATIA PALUDARIU PENTRU ANDROID
+==================================
+
+Ce face
+- Gaseste singura placile Paludariu din WiFi-ul de acasa (cele cu codul paludariu.ino nou).
+- Pastreaza placile deschise o data, plus cele adaugate dupa adresa.
+- Deschide pagina placii pe tot ecranul si tine minte parola paginii.
+
+Cum o instalezi pe telefon
+1. Instaleaza Android Studio pe PC (gratuit, de pe developer.android.com/studio).
+2. Dezarhiveaza PaludariuApp.zip intr-un folder, de exemplu Documente\PaludariuApp.
+3. In Android Studio: File > Open si alegi folderul PaludariuApp.
+   Prima deschidere descarca tot ce trebuie (cateva minute). Asteapta sa se termine "Gradle sync".
+   Daca te intreaba de actualizarea versiunii Gradle / Android Gradle Plugin, poti accepta.
+4. Pe telefon activeaza "Optiuni dezvoltator" (Setari > Despre telefon > apasa de 7 ori pe "Numarul versiunii"),
+   apoi in Optiuni dezvoltator porneste "Depanare USB".
+5. Leaga telefonul cu cablu USB la PC si accepta pe telefon cererea de depanare.
+6. In Android Studio alege telefonul sus, in lista de dispozitive, si apasa butonul verde Run (triunghiul).
+   Aplicatia "Paludariu" se instaleaza si porneste.
+
+Varianta fara cablu: Build > Build App Bundle(s) / APK(s) > Build APK(s).
+Fisierul apare in app\build\outputs\apk\debug\app-debug.apk. Il copiezi pe telefon si il deschizi
+(telefonul va cere permisiunea de a instala aplicatii din aceasta sursa).
+
+Pe placa
+- Incarca noul paludariu.ino. Placa se anunta in retea cu numele din DEVICE_NAME ("Paludariu 1").
+- Daca ai mai multe placi, pune pe fiecare alt DEVICE_NAME si alt MDNS_NAME.
+
+NOTIFICARI (versiunea 1.3)
+- In aplicatie, jos: "Porneste notificarile" si accepta cererea telefonului.
+- "Trimite o notificare de test" verifica placile pe loc si iti arata rezultatul.
+- Telefonul verifica placile salvate cam la fiecare 15 minute, doar cand e pe WiFi.
+- Deschide o data fiecare placa in aplicatie, ca sa-i salveze parola (fara ea verificarea nu merge).
+- Samsung: Setari > Aplicatii > Paludariu > Baterie > "Nerestrictionat",
+  altfel telefonul poate amana verificarile cand sta neatins.
+
+
+MODUL OFFLINE (versiunea 1.4)
+Cat timp placa raspunde, aplicatia pastreaza o copie a paginii si a ultimelor date (stare, grafice, jurnal).
+Cand placa nu raspunde, aplicatia arata copia aceea cu o banda rosie "Placa e offline": animatiile merg,
+fiecare senzor si accesoriu e marcat "offline", iar comenzile nu se trimit. La 15 secunde aplicatia verifica
+singura daca placa a revenit; poti apasa si "Reincearca".
+
+
+ACCES DE LA DISTANTA SI ACTUALIZARI (versiunea 1.8)
+Acces prin internet (fara port deschis in router):
+- Acasa, pe WiFi-ul placii: deschizi placa > Setari > "Acces de la distanta" > Configureaza.
+- Scrii adresa serverului EMQX (Overview > Address), utilizatorul si parola PLACII (placa1)
+  si apoi utilizatorul si parola TELEFONULUI (telefon). Cheia de criptare o face aplicatia singura
+  si o trimite placii pe WiFi-ul de acasa; nu trece niciodata prin internet.
+- Dupa asta, cand nu esti acasa, aplicatia deschide placa prin internet (apare "Prin internet" sus).
+- Setarile raman pe placa si in aplicatie si dupa actualizari. Nu le trimite nimanui.
+
+Actualizarea aplicatiei
+- Cand pui un Paludariu.apk nou la Releases pe GitHub, aplicatia iti arata jos "Versiune noua a aplicatiei".
+- Sau o urmaresti cu Obtainium (adaugi adresa depozitului GitHub) si se actualizeaza de acolo.
+- APK-ul trebuie semnat cu ACEEASI cheie (paludariu app.jks), altfel telefonul nu-l instaleaza peste cel vechi.
+
+Reteaua "Paludariu-Setup"
+- Daca ai pus alta parola cu SETUP_PAROLA in config.h, la "Placa noua" apesi "Am schimbat parola retelei" si o scrii.
