@@ -47,6 +47,7 @@ public class BoardActivity extends Activity {
     private SharedPreferences prefs;
     private boolean triedSaved = false;   // parola salvata a fost deja incercata pentru incarcarea curenta
     private volatile boolean offline = false;
+    private volatile boolean lostCheck = false;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private boolean checking = false;
     // acces de la distanta: placa nu e in reteaua ta, dar raspunde prin serverul MQTT (criptat cap-coada)
@@ -90,7 +91,7 @@ public class BoardActivity extends Activity {
             if (!decided && !isFinishing() && hasCache()) showCached(true);
         }, 1200);
         Thread t = new Thread(() -> {
-            boolean ok = boardAnswers() || relocate();
+            boolean ok = boardAnswersHome() || relocate();
             boolean rem = !ok && tryRemote();
             ui.post(() -> {
                 decided = true;
@@ -107,6 +108,43 @@ public class BoardActivity extends Activity {
         });
         t.setDaemon(true);
         t.start();
+        watchNetwork();
+    }
+
+    // ---------------- schimbarea retelei (WiFi <-> date mobile) ----------------
+    private android.net.ConnectivityManager.NetworkCallback netCb;
+    private volatile long netGen = 0;
+
+    /** Cand telefonul trece intre WiFi si date mobile, alegem din nou drumul: direct (acasa) sau prin internet. */
+    private void watchNetwork() {
+        android.net.ConnectivityManager cm = (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+        if (cm == null) return;
+        netCb = new android.net.ConnectivityManager.NetworkCallback() {
+            @Override public void onAvailable(android.net.Network n) { netChanged(); }
+            @Override public void onLost(android.net.Network n) { netChanged(); }
+        };
+        try { cm.registerDefaultNetworkCallback(netCb); } catch (Exception e) { netCb = null; }
+    }
+
+    private void netChanged() {
+        final long g = ++netGen;
+        // asteptam 2 s sa se aseze reteaua noua (adresa, ruta), apoi verificam o singura data
+        ui.postDelayed(() -> { if (g == netGen && decided && !isFinishing()) recheck(); }, 2000);
+    }
+
+    private void recheck() {
+        new Thread(() -> {
+            if (boardAnswersHome() || relocate()) {      // esti acasa: legatura directa
+                ui.post(() -> { if (offline || remote) goOnline(); });
+                return;
+            }
+            boolean rem = tryRemote();                   // legatura veche prin internet era pe reteaua de dinainte
+            ui.post(() -> {
+                if (isFinishing()) return;
+                if (rem) goRemote();
+                else if (!offline || remote) goOffline();
+            });
+        }).start();
     }
 
     private static String appVersion = null;
@@ -137,6 +175,10 @@ public class BoardActivity extends Activity {
     @Override
     protected void onDestroy() {
         checking = false;
+        if (netCb != null) {
+            try { ((android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE)).unregisterNetworkCallback(netCb); } catch (Exception ignored) { }
+            netCb = null;
+        }
         closeSession();
         if (web != null) web.destroy();
         super.onDestroy();
@@ -147,7 +189,8 @@ public class BoardActivity extends Activity {
     public void onBackPressed() {
         // Inapoi duce direct la lista de placi. Daca e deschis meniul de alegere a placii din pagina, il inchide doar pe el.
         if (web == null) { super.onBackPressed(); return; }
-        web.evaluateJavascript("(function(){var s=document.getElementById('sh');if(s&&!s.hidden&&window.closeSh){closeSh();return 1}return 0})()",
+        // pagina noua (1.8.7): __back inchide fereastra deschisa / submeniul / revine la Acasa; altfel, ca inainte
+        web.evaluateJavascript("(function(){if(window.__back)return window.__back();var s=document.getElementById('sh');if(s&&!s.hidden&&window.closeSh){closeSh();return 1}return 0})()",
                 v -> { if (!"1".equals(v)) finish(); });
     }
 
@@ -185,6 +228,25 @@ public class BoardActivity extends Activity {
         }
     }
 
+    /** Pagina salvata, fara bucatile pe care le adauga aplicatia (o copie veche le putea avea de mai multe ori). */
+    private String cleanPage() {
+        String html = readCache("/");
+        if (html == null) return null;
+        String[] marks = {"<style>#rmb{", "<style>#offb{"};
+        boolean changed = false;
+        for (String m : marks) {
+            int a;
+            while ((a = html.indexOf(m)) >= 0) {
+                int b = html.indexOf("})();</script>", a);
+                if (b < 0) break;
+                html = html.substring(0, a) + html.substring(b + "})();</script>".length());
+                changed = true;
+            }
+        }
+        if (changed) writeCache("/", html);
+        return html;
+    }
+
     private boolean hasCache() {
         return cacheFile("/").exists() && cacheFile("/s").exists();
     }
@@ -194,12 +256,32 @@ public class BoardActivity extends Activity {
         @JavascriptInterface
         public void save(String path, String text) {
             if ((offline && !remote) || text == null || text.isEmpty()) return;
+            if (path.equals("/") && (remote || text.contains("id='rmb'") || text.contains("id='offb'"))) return;   // doar pagina curata, de la placa
             if (path.equals("/") || path.equals("/s") || path.equals("/h") || path.equals("/h30") || path.equals("/e")) writeCache(path, text);
             if (path.equals("/s")) widgetData(text);
         }
 
         @JavascriptInterface
         public void lost() {   // placa nu mai raspunde de cateva ori la rand
+            if (remote) {
+                if (lostCheck) return;
+                lostCheck = true;
+                // prin internet un raspuns poate intarzia: intai verificam legatura, abia apoi zicem "offline"
+                new Thread(() -> {
+                    Remote.Session s = session;
+                    boolean ok = false;
+                    try { ok = s != null && s.isOpen() && s.request("/s", 10000).code == 200; } catch (Exception ignored) { }
+                    if (!ok && tryRemote()) ok = true;
+                    final boolean fine = ok;
+                    lostCheck = false;
+                    ui.post(() -> {
+                        if (!remote) return;
+                        if (fine) web.evaluateJavascript("window.load&&load()", null);
+                        else goOffline();
+                    });
+                }).start();
+                return;
+            }
             ui.post(() -> { if (!offline) goOffline(); });
         }
 
@@ -332,7 +414,8 @@ public class BoardActivity extends Activity {
         checking = true;
         Thread t = new Thread(() -> {
             while (checking && offline) {
-                try { Thread.sleep(15000); } catch (InterruptedException e) { return; }
+                long pause = (remote && onWifi()) ? 5000 : 15000;   // pe WiFi, prin internet: poate esti acasa
+                try { Thread.sleep(pause); } catch (InterruptedException e) { return; }
                 if (!checking || !offline) return;
                 if (boardAnswers() || relocate()) {
                     ui.post(() -> { if (offline) goOnline(); });   // ai ajuns acasa: direct, fara internet
@@ -346,6 +429,28 @@ public class BoardActivity extends Activity {
     }
 
     private boolean boardAnswers() { return boardAnswersAt(url); }
+
+    /** Telefonul e pe WiFi (oricare)? Atunci probabil esti acasa si merita insistat pe legatura directa. */
+    private boolean onWifi() {
+        try {
+            android.net.ConnectivityManager cm = (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            android.net.Network n = cm == null ? null : cm.getActiveNetwork();
+            android.net.NetworkCapabilities c = n == null ? null : cm.getNetworkCapabilities(n);
+            return c != null && c.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Pe WiFi incercam direct de 3 ori (placa poate intarzia o clipa); pe date mobile o data e de ajuns. */
+    private boolean boardAnswersHome() {
+        int n = onWifi() ? 3 : 1;
+        for (int i = 0; i < n; i++) {
+            if (boardAnswers()) return true;
+            if (i + 1 < n) try { Thread.sleep(700); } catch (InterruptedException e) { return false; }
+        }
+        return false;
+    }
 
     private String boardKey() {
         String n = getIntent().getStringExtra(EXTRA_NAME);
@@ -388,7 +493,7 @@ public class BoardActivity extends Activity {
     }
 
     private String remoteHtml() {
-        String html = readCache("/");
+        String html = cleanPage();
         if (html == null) return "";
         String ver = appVersion().replace("'", "");
         String inject = "<style>#rmb{position:sticky;top:8px;z-index:60;width:max-content;max-width:100%;margin:10px auto 0;padding:8px 14px;"
@@ -403,7 +508,7 @@ public class BoardActivity extends Activity {
     }
 
     private static final java.util.Set<String> REMOTE_PATHS = new java.util.HashSet<>(java.util.Arrays.asList(
-            "/s", "/h", "/h30", "/e", "/m", "/save", "/pl", "/mem", "/cfg", "/vac", "/gh", "/tgtest"));
+            "/s", "/h", "/h30", "/e", "/m", "/save", "/pl", "/mem", "/cfg", "/vac", "/gh", "/tgtest", "/opt"));
 
     /** O cerere a paginii, trimisa placii prin internet. */
     private WebResourceResponse remoteResponse(Uri u) {
@@ -498,7 +603,7 @@ public class BoardActivity extends Activity {
 
     /** Pagina salvata, cu banda "offline" sus si comenzile oprite. Animatiile merg cu ultima stare primita. */
     private void showCached(boolean connecting) {
-        String html = readCache("/");
+        String html = cleanPage();
         if (html == null) { showOffline(); return; }
         cachedShown = true;
         bannerConnecting = connecting;
@@ -537,7 +642,7 @@ public class BoardActivity extends Activity {
                 + "b.querySelector('button').onclick=function(){window.PaludariuApp&&PaludariuApp.retry()};"
                 + "function no(){if(b.className=='con')return;var s=b.querySelector('span');s.textContent='Placa e offline, comenzile nu pot fi trimise acum.';"
                 + "setTimeout(function(){s.textContent=OFF},3500)}"
-                + "['mod','salv','plCmd','tgTest','memGata','upload'].forEach(function(f){window[f]=function(){no();return Promise.resolve()}});"
+                + "['mod','salv','plCmd','tgTest','memGata','upload','optCmd'].forEach(function(f){window[f]=function(){no();return Promise.resolve()}});"
                 + "})();</script>";
         int end = html.lastIndexOf("</body>");
         html = end >= 0 ? html.substring(0, end) + inject + html.substring(end) : html + inject;
@@ -757,15 +862,40 @@ public class BoardActivity extends Activity {
                 AlertChecker.reschedule(this);
                 // 2. asteptam ca placa sa se conecteze la server
                 int cod = 1;
-                for (int i = 0; i < 15 && cod == 1; i++) {
+                String err = "";
+                for (int i = 0; i < 30 && cod == 1; i++) {   // placa isi asteapta randul (Telegram), apoi se conecteaza
                     remoteProgress("Placa se conectează la server… (" + (i * 2) + " s)");
                     Thread.sleep(2000);
                     String st = AlertChecker.get(this, url, "/mqttcfg");
-                    if (st != null) cod = new org.json.JSONObject(st).optInt("cod", 1);
+                    if (st != null) {
+                        org.json.JSONObject sj = new org.json.JSONObject(st);
+                        cod = sj.optInt("cod", 1);
+                        err = sj.optString("err", "");
+                    }
                 }
-                if (cod == 3) { remoteDone("Placa nu a fost primită", "Serverul a refuzat utilizatorul sau parola plăcii. Verifică-le în EMQX: Access Control → Authentication."); return; }
-                if (cod == 4) { remoteDone("Placa nu ajunge la server", "Verifică adresa serverului. O găsești în EMQX, pe pagina serverului, la Address."); return; }
-                if (cod != 2) { remoteDone("Încă se conectează", "Placa nu s-a conectat la server în 30 de secunde. Mai încearcă o dată peste un minut."); return; }
+                String det = err.isEmpty() ? "" : "\n\nCe spune placa: " + err;
+                if (cod == 3) { remoteDone("Placa nu a fost primită", "Serverul a refuzat utilizatorul sau parola plăcii. Verifică-le în EMQX: Access Control → Authentication." + det); return; }
+                if (cod == 4) {
+                    // incercam si de pe telefon, din acelasi WiFi: asa aflam daca e adresa/reteaua sau placa
+                    remoteProgress("Încerc serverul și de pe telefon…");
+                    String tel;
+                    MiniMqtt t = new MiniMqtt();
+                    try {
+                        byte[] r4 = new byte[4];
+                        Remote.RND.nextBytes(r4);
+                        t.connect(hostSpec, "app-test-" + Remote.hex(r4), phoneUser, phonePass, 30, null);
+                        tel = "Telefonul, din același WiFi, ajunge la server, deci adresa e bună și rețeaua nu blochează nimic: problema e la placă.";
+                    } catch (MiniMqtt.RefusedException e) {
+                        tel = "Telefonul ajunge la server, deci adresa e bună (dar contul telefonului e refuzat).";
+                    } catch (Exception e) {
+                        tel = "Nici telefonul nu ajunge la server: " + e.getClass().getSimpleName() + (e.getMessage() != null ? " · " + e.getMessage() : "") + ". Verifică adresa (EMQX → Overview → Address).";
+                    } finally {
+                        t.disconnect();
+                    }
+                    remoteDone("Placa nu ajunge la server", tel + det);
+                    return;
+                }
+                if (cod != 2) { remoteDone("Încă se conectează", "Placa nu s-a conectat la server într-un minut. Uită-te peste un minut în Setări → Acces de la distanță: placa încearcă singură, din 30 în 30 de secunde."); return; }
                 // 3. testam si drumul telefonului, ca de la distanta
                 remoteProgress("Testez legătura telefonului…");
                 Remote.Resp t = Remote.once(cfg, "/s");

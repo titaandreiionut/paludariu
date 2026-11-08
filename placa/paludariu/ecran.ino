@@ -121,6 +121,7 @@ bool alertaEcran(char* b, size_t n) {
   if (isnan(temp) || isnan(hum)) { snprintf(b, n, "Senzor DHT22 indisponibil"); return true; }
   if (ledOverheat) { snprintf(b, n, "Radiator LED supraincalzit"); return true; }
   if (fanFail) { snprintf(b, n, "Ventilator LED oprit"); return true; }
+  if (umBlocat) { snprintf(b, n, "Senzor umiditate blocat?"); return true; }
   if (hum < S.mistOn - 5) { snprintf(b, n, "Umiditate scazuta: %d%%", (int)lroundf(hum)); return true; }
   if (hum > S.fanOn + 3) { snprintf(b, n, "Umiditate mare: %d%%", (int)lroundf(hum)); return true; }
   if (temp < 20) { snprintf(b, n, "Prea frig: %.1f C", temp); return true; }
@@ -502,9 +503,12 @@ void drawJurnal() {
       snprintf(tb, sizeof tb, "%02d:%02d", tmv.tm_hour, tmv.tm_min);
     } else snprintf(tb, sizeof tb, "-%ldm", (now - (long)e.t) / 60);
     const char* nm = e.out < 4 ? NUME[e.out] : e.out == 4 ? "Ploaie" : "Intretinere";
-    if (e.out >= 10) snprintf(row, sizeof row, "%-5s Intretinere: gata", tb);
-    else if (e.h > 0) snprintf(row, sizeof row, "%-5s %-10s %-3s %c %d%%", tb, nm, e.on ? "ON" : "OFF", e.man ? 'M' : 'A', e.h / 10);
-    else snprintf(row, sizeof row, "%-5s %-10s %-3s %c", tb, nm, e.on ? "ON" : "OFF", e.man ? 'M' : 'A');
+    static const char* PRG[4] = {"Ceata ON", "Ceata OFF", "Vent. ON", "Vent. OFF"};
+    char md = e.man == 2 ? 'T' : e.man ? 'M' : 'A';   // T = ceata pornita din timp (optimizare)
+    if (e.out >= 20 && e.out <= 23) snprintf(row, sizeof row, "%-5s Prag %-9s %d->%d%%", tb, PRG[e.out - 20], e.h / 10, e.man);   // reglaj / sfat
+    else if (e.out >= 10) snprintf(row, sizeof row, "%-5s Intretinere: gata", tb);
+    else if (e.h > 0) snprintf(row, sizeof row, "%-5s %-10s %-3s %c %d%%", tb, nm, e.on ? "ON" : "OFF", md, e.h / 10);
+    else snprintf(row, sizeof row, "%-5s %-10s %-3s %c", tb, nm, e.on ? "ON" : "OFF", md);
     tft.setTextColor(e.on ? cGR : cMUT); tft.setCursor(4, 118 + rows * 12); tft.print(row);
   }
   if (evCount == 0) { tft.setTextColor(cMUT); tft.setCursor(4, 130); tft.print("Niciun eveniment inca."); }
@@ -515,7 +519,18 @@ const char* PL[11] = {"Ceata ON sub %", "Ceata OFF peste %", "Ventil. ON peste %
                       "Lumina ON", "Lumina OFF", "Pompa ON (min)", "Pompa OFF (min)",
                       "Circul. la (min)", "Circul. dur. (min)", "Standby ecran (min)"};
 
+// Cu "Umiditate dorita" pornita, primele doua randuri din Praguri sunt tinta si cat de strict,
+// iar ultimele doua arata pragurile calculate (fara butoane).
+const char* PLU[4] = {"Umiditate dorita", "Cat de strict", "Ceata", "Ventilator"};
 void addP(int id, int d) {
+  if (S.umAuto && id <= 3) {
+    if (id == 0) S.umTinta = constrain(S.umTinta + d, 70, 95);
+    else if (id == 1) S.umStrict = constrain((int)S.umStrict + d, 2, 4);
+    else return;
+    umCalc(); optTintaNoua();
+    dirty = true; tDirty = millis();
+    return;
+  }
   switch (id) {
     case 0: S.mistOn = constrain(S.mistOn + d, 50.0f, 100.0f); if (S.mistOn > S.mistOff) S.mistOff = S.mistOn; break;
     case 1: S.mistOff = constrain(S.mistOff + d, 50.0f, 100.0f); if (S.mistOff < S.mistOn) S.mistOn = S.mistOff; break;
@@ -533,6 +548,13 @@ void addP(int id, int d) {
 }
 
 void fmtP(int id, char* b, size_t n) {
+  if (S.umAuto && id <= 3) {
+    if (id == 0) snprintf(b, n, "%d%%", S.umTinta);
+    else if (id == 1) snprintf(b, n, "+-%d%%", S.umStrict);
+    else if (id == 2) snprintf(b, n, "%.0f-%.0f%%", S.mistOn, S.mistOff);
+    else snprintf(b, n, "%.0f/%.0f%%", S.fanOn, S.fanOff);
+    return;
+  }
   switch (id) {
     case 0: snprintf(b, n, "%.0f%%", S.mistOn); break;
     case 1: snprintf(b, n, "%.0f%%", S.mistOff); break;
@@ -552,7 +574,15 @@ void drawRow(int pg, int slot) {
   int id = (pg == PG_PRAG ? 0 : 4) + slot, rowH = pg == PG_PRAG ? 66 : 38, y0 = 26 + slot * rowH;
   tft.fillRect(0, y0, 240, rowH, cBG);
   tft.drawFastHLine(8, y0 + rowH - 1, 224, cLINE);
-  tft.setTextSize(1); tft.setTextColor(cTXT); tft.setCursor(6, y0 + rowH / 2 - 4); tft.print(PL[id]);
+  bool um = S.umAuto && id <= 3, info = um && id >= 2;
+  tft.setTextSize(1); tft.setTextColor(info ? cMUT : cTXT); tft.setCursor(6, y0 + rowH / 2 - 4); tft.print(um ? PLU[id] : PL[id]);
+  if (info) {   // prag calculat: doar valoarea
+    char b[12]; fmtP(id, b, sizeof b);
+    int len = (int)strlen(b);
+    tft.setTextSize(2); tft.setTextColor(cMUT);
+    tft.setCursor(234 - len * 12, y0 + rowH / 2 - 8); tft.print(b);
+    return;
+  }
   int by = y0 + (rowH - 30) / 2;
   tft.fillRoundRect(118, by, 28, 30, 5, cLINE);
   tft.fillRoundRect(206, by, 28, 30, 5, cLINE);
@@ -563,6 +593,12 @@ void drawRow(int pg, int slot) {
   int len = (int)strlen(b); uint8_t sz = len <= 5 ? 2 : 1;
   tft.setTextSize(sz); tft.setTextColor(cCY);
   tft.setCursor(176 - len * 6 * sz / 2, y0 + rowH / 2 - 4 * sz); tft.print(b);
+}
+
+// dupa o schimbare: cu tinta pornita se schimba si pragurile calculate, deci redesenam toate randurile
+void randuriDupa(int id) {
+  if (pagina == PG_PRAG && S.umAuto) { for (int s = 0; s < 4; s++) drawRow(pagina, s); }
+  else drawRow(pagina, id - (pagina == PG_PRAG ? 0 : 4));
 }
 
 void drawSettings() {
@@ -595,6 +631,7 @@ int stepButton(int x, int y, int& dir) {
   if (y < 26) return -1;
   int slot = (y - 26) / rowH;
   if (slot >= cnt) return -1;
+  if (pagina == PG_PRAG && S.umAuto && slot >= 2) return -1;   // pragurile calculate nu se schimba de aici
   if (x >= 114 && x < 150) dir = -1; else if (x >= 202 && x < 238) dir = 1; else return -1;
   return (pagina == PG_PRAG ? 0 : 4) + slot;
 }
@@ -622,13 +659,13 @@ void touchLoop(unsigned long now) {
     if (!down) {
       down = true; consumed = false; sx = lx = x; sy = ly = y; tPress = tRep = now;
       int dir; int id = stepButton(sx, sy, dir);
-      if (id >= 0) { addP(id, dir); drawRow(pagina, id - (pagina == PG_PRAG ? 0 : 4)); consumed = true; }
+      if (id >= 0) { addP(id, dir); randuriDupa(id); consumed = true; }
     } else {
       lx = x; ly = y;
       if (consumed && now - tPress > 400 && now - tRep > 120) {      // apasat lung pe - / +: repeta
         tRep = now;
         int dir; int id = stepButton(sx, sy, dir);
-        if (id >= 0) { addP(id, dir); drawRow(pagina, id - (pagina == PG_PRAG ? 0 : 4)); }
+        if (id >= 0) { addP(id, dir); randuriDupa(id); }
       }
     }
   } else if (swallow) {

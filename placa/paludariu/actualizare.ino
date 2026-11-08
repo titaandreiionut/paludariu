@@ -30,7 +30,7 @@ void ghIncarca() {
 }
 
 String ghJsonScurt() {   // pentru "sys" din /s
-  return ",\"gh\":\"" + jEsc(ghRepo) + "\",\"ghn\":\"" + (ghSt == 3 ? jEsc(ghNou) : String("")) + "\",\"mq\":" + String(mqttCod());
+  return ",\"gh\":\"" + jEsc(ghRepo) + "\",\"ghn\":\"" + (ghSt == 3 ? jEsc(ghNou) : String("")) + "\",\"mq\":" + String(mqttCod()) + ",\"mqe\":\"" + jEsc(mqttErr()) + "\"";
 }
 
 // "v1.8.2" -> 1, 8, 2 ; intoarce >0 daca a e mai noua decat b
@@ -64,6 +64,8 @@ String ghUrl(const String& j, const char* sfarsit) {
 
 bool ghVerifica() {
   if (ghRepo.indexOf('/') <= 0) { ghErr = "Scrie întâi depozitul GitHub, de exemplu numele-tau/paludariu."; return false; }
+  TlsRand rand(60000);   // o singura legatura criptata odata (memoria)
+  if (!rand.ok) { ghErr = "Placa e ocupată cu altă legătură. Mai încearcă peste un minut."; return false; }
   WiFiClientSecure cl;
   cl.setInsecure();   // integritatea o garanteaza semnatura, verificata inainte de instalare
   HTTPClient h;
@@ -108,6 +110,8 @@ bool ghInstaleaza() {
   if (!ghCheieOk()) { ghErr = "Lipsește cheia pentru semnături (CHEIE_ACTUALIZARE în config.h). Fără ea placa nu instalează nimic de pe internet."; return false; }
   if (!otaPosibil()) { ghErr = "Placa nu are loc pentru actualizare (Partition Scheme: Minimal SPIFFS with OTA)."; return false; }
   if (!ghSig.length()) { ghErr = "Versiunea " + ghNou + " nu are semnătura (.bin.sig). N-o instalez."; return false; }
+  TlsRand rand(60000);   // o singura legatura criptata odata (memoria)
+  if (!rand.ok) { ghErr = "Placa e ocupată cu altă legătură. Mai încearcă peste un minut."; return false; }
   WiFiClientSecure cl;
   cl.setInsecure();
   HTTPClient h;
@@ -158,6 +162,8 @@ void ghFir(void* p) {
   int mod = (int)(intptr_t)p;   // 1 verifica, 2 verifica si instaleaza, 3 verificare zilnica (fara zgomot)
   ghErr = "";
   ghSt = 1;
+  if (mqttCod() == 2) vTaskDelay(pdMS_TO_TICKS(1500));   // lasam sa plece raspunsul, daca ai cerut prin internet
+  mqPauza(true);   // legatura de la distanta tine ~35 KB; o oprim cat vorbim cu GitHub
   bool ok = ghVerifica();
   if (ok && mod == 2 && ghSt == 3) {
     ghSt = 4; ghPct = 0;
@@ -165,6 +171,8 @@ void ghFir(void* p) {
     if (ok) ghSt = 5;
   }
   if (!ok) ghSt = 6;
+  if (!ok && !ghErr.length()) ghErr = "Verificarea n-a reușit (memorie puțină). Mai încearcă o dată.";
+  if (ghSt != 5) mqPauza(false);   // dupa instalare placa reporneste oricum
 #if FOLOSESTE_TELEGRAM
   if (ok && ghSt == 3 && ghAnuntat != ghNou) {
     ghAnuntat = ghNou;
@@ -190,6 +198,7 @@ void ghLoop() {
     prefs.putUChar("otaOk", 1);
     histSalveaza();
     evSalveaza();
+    optSalveazaZile();
     restartLa = millis() + 2000;
   }
   if (ghRepo.indexOf('/') <= 0 || WiFi.status() != WL_CONNECTED) return;

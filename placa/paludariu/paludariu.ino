@@ -3,10 +3,13 @@
 //   (cu "Huge APP" merge tot, dar fara actualizare prin WiFi; schimbarea se face o singura data, prin cablu)
 //
 // DATELE TALE (WiFi, parole, Telegram, Tuya, relee, senzori) stau in config.h, in acelasi folder.
-// Cand primesti o versiune noua, inlocuiesti DOAR fisierul asta (paludariu.ino); config.h ramane neatins.
+// Cand primesti o versiune noua, inlocuiesti toate fisierele din folder, mai putin config.h.
 #include "config.h"
-#define VERSIUNE "1.8"
+#define VERSIUNE "1.8.8"
 struct Arg; struct Rasp;   // cererile paginii (vezi mai jos)
+struct ZiOpt; struct OptMed; struct Sfat;   // optimizare.ino
+extern bool ceataDinTimp;
+
 struct Bula;   // folosita de ecran; declarata devreme ca Arduino IDE sa poata face prototipurile
 
 #include <WiFi.h>
@@ -52,6 +55,34 @@ struct Bula;   // folosita de ecran; declarata devreme ca Arduino IDE sa poata f
 #include <Adafruit_SHT31.h>
 #endif
 #include <time.h>
+
+// Memorie luata doar cat e nevoie (in loc de buffere tinute tot timpul); se elibereaza singura.
+template <class T> struct Tmp {
+  T* p;
+  explicit Tmp(size_t n) : p((T*)malloc(n * sizeof(T))) {}
+  ~Tmp() { free(p); }
+  T& operator[](size_t i) { return p[i]; }
+};
+
+// O singura legatura criptata (TLS) se deschide odata: fiecare cere ~45 KB de memorie la deschidere.
+// Telegram, GitHub si serverul MQTT isi asteapta randul aici.
+SemaphoreHandle_t tlsSem = nullptr;
+volatile bool tlsCerut = false;   // MQTT asteapta: ceilalti nu mai incep legaturi noi
+bool tlsIa(uint32_t ms) {
+  if (!tlsSem) return true;
+  return xSemaphoreTake(tlsSem, pdMS_TO_TICKS(ms)) == pdTRUE;
+}
+void tlsLasa() { if (tlsSem) xSemaphoreGive(tlsSem); }
+// Pentru Telegram si GitHub: lasa intai MQTT (cel mult 15 s), apoi asteapta randul.
+struct TlsRand {
+  bool ok;
+  explicit TlsRand(uint32_t ms) {
+    for (int i = 0; i < 150 && tlsCerut; i++) vTaskDelay(pdMS_TO_TICKS(100));
+    ok = tlsIa(ms);
+  }
+  void lasa() { if (ok) { ok = false; tlsLasa(); } }
+  ~TlsRand() { lasa(); }
+};
 
 // ---------- PINI ----------
 const int PIN_SDA = 21, PIN_SCL = 22;
@@ -111,9 +142,13 @@ struct Setari {
   int plDur;                 // cate secunde ploua
   int plMax;                 // nu ploua daca umiditatea e deja peste atat (%)
   int plVent;                // minute de ventilator dupa ploaie (0 = deloc)
+  // Umiditate dorita (1.8.8): o singura valoare, iar pragurile de ceata si ventilator se calculeaza din ea
+  uint8_t umAuto;            // 1 = pragurile se calculeaza singure din umTinta
+  uint8_t umStrict;          // cat de strict: 2, 3 sau 4 (%)
+  int umTinta;               // umiditatea dorita (70-95 %)
 };
 Setari S;
-const uint8_t VER = 5;
+const uint8_t VER = 6;
 
 Preferences prefs;
 WebServer server(80);
@@ -207,18 +242,20 @@ void histPune(int16_t t, int16_t h) {
 }
 void histSalveaza() {
   if (histEpoch < 1000000000UL || histCount == 0) return;
-  static int16_t buf[2 * H_N + 4];
+  Tmp<int16_t> buf(2 * H_N + 4);
+  if (!buf.p) return;
   buf[0] = histEpoch & 0xFFFF; buf[1] = histEpoch >> 16; buf[2] = histCount; buf[3] = 0;
   for (int i = 0; i < histCount; i++) {
     int k = (histHead - histCount + i + H_N) % H_N;
     buf[4 + i] = histT[k]; buf[4 + H_N + i] = histH[k];
   }
-  prefs.putBytes("hist", buf, sizeof(buf));
+  prefs.putBytes("hist", buf.p, (2 * H_N + 4) * sizeof(int16_t));
   histDeSalvat = 0;
 }
 void histIncarca() {
-  static int16_t buf[2 * H_N + 4];
-  if (prefs.getBytes("hist", buf, sizeof(buf)) != sizeof(buf)) return;
+  Tmp<int16_t> buf(2 * H_N + 4);
+  const size_t L = (2 * H_N + 4) * sizeof(int16_t);
+  if (!buf.p || prefs.getBytes("hist", buf.p, L) != L) return;
   int n = buf[2];
   if (n <= 0 || n > H_N) return;
   histEpoch = (uint16_t)buf[0] | ((uint32_t)(uint16_t)buf[1] << 16);
@@ -256,17 +293,19 @@ void h30Pune(int16_t t, int16_t h) {
   if (h30Count < H30_N) h30Count++;
 }
 void h30Salveaza() {
-  static int16_t buf[2 * H30_N + 4];
+  Tmp<int16_t> buf(2 * H30_N + 4);
+  if (!buf.p) return;
   buf[0] = h30Last & 0xFFFF; buf[1] = h30Last >> 16; buf[2] = h30Count; buf[3] = 0;
   for (int i = 0; i < h30Count; i++) {
     int k = (h30Head - h30Count + i + H30_N) % H30_N;
     buf[4 + i] = h30T[k]; buf[4 + H30_N + i] = h30H[k];
   }
-  prefs.putBytes("h30", buf, sizeof(buf));
+  prefs.putBytes("h30", buf.p, (2 * H30_N + 4) * sizeof(int16_t));
 }
 void h30Incarca() {
-  static int16_t buf[2 * H30_N + 4];
-  if (prefs.getBytes("h30", buf, sizeof(buf)) != sizeof(buf)) return;
+  Tmp<int16_t> buf(2 * H30_N + 4);
+  const size_t L = (2 * H30_N + 4) * sizeof(int16_t);
+  if (!buf.p || prefs.getBytes("h30", buf.p, L) != L) return;
   int n = buf[2];
   if (n <= 0 || n > H30_N) return;
   h30Last = (uint16_t)buf[0] | ((uint32_t)(uint16_t)buf[1] << 16);
@@ -322,7 +361,7 @@ String memJson() {
   }
   return j + "]";
 }
-void logEvM(int i, bool on, bool man);
+void logEvM(int i, bool on, uint8_t man);
 bool memGata(int i) {
   time_t n = time(nullptr);
   if (i < 0 || i >= MEM_N || n < 1000000000) return false;
@@ -358,7 +397,7 @@ bool tuyaConfigurat();
 void ploaieStart(int sec, bool manual);
 void ploaieStop(bool manual);
 String plJson();
-void logEvM(int i, bool on, bool man);
+void logEvM(int i, bool on, uint8_t man);
 
 // Jurnal evenimente: ultimele 120 porniri/opriri, tinute in RAM (se golesc la repornire)
 struct Ev { uint32_t t; uint8_t out, on, man; int16_t h; };
@@ -369,10 +408,12 @@ uint32_t acum() {   // ora reala (epoch) daca e sincronizata, altfel secunde de 
   time_t n = time(nullptr);
   return n > 1000000000 ? (uint32_t)n : (uint32_t)(millis() / 1000);
 }
-void logEv(int i, bool on) { logEvM(i, on, i < 4 && S.mod[i] != 0); }
+// man: 0 automat, 1 manual, 2 ceata pornita din timp (optimizare)
+void logEv(int i, bool on) { logEvM(i, on, (i < 4 && S.mod[i] != 0) ? 1 : (i == 2 && on && ceataDinTimp) ? 2 : 0); }
 bool evSchimbat = false;      // jurnalul are intrari noi, nesalvate inca
-void logEvM(int i, bool on, bool man) {
+void logEvM(int i, bool on, uint8_t man) {
   evSchimbat = true;
+  if (i < 5) optEveniment(i, on);
   Ev& e = evl[evHead];
   e.t = acum(); e.out = i; e.on = on; e.man = man;
   e.h = isnan(hum) ? -1 : (int16_t)lroundf(hum * 10);
@@ -382,20 +423,21 @@ void logEvM(int i, bool on, bool man) {
 // Jurnalul se salveaza in memoria permanenta la 10 minute (si inainte de o repornire facuta de placa),
 // ca sa nu se piarda la o pana de curent. Se pastreaza doar intrarile cu ora reala.
 void evSalveaza() {
-  static Ev buf[EV_N];
+  Tmp<Ev> buf(EV_N);
+  if (!buf.p) return;
   int n = 0;
   for (int k = 0; k < evCount; k++) {
     Ev& e = evl[(evHead - evCount + k + EV_N) % EV_N];
     if (e.t > 1000000000UL) buf[n++] = e;
   }
-  if (n) prefs.putBytes("ev", buf, n * sizeof(Ev)); else prefs.remove("ev");
+  if (n) prefs.putBytes("ev", buf.p, n * sizeof(Ev)); else prefs.remove("ev");
   evSchimbat = false;
 }
 void evIncarca() {
   size_t len = prefs.getBytesLength("ev");
   if (!len || len % sizeof(Ev) || len > sizeof(evl)) return;
-  static Ev buf[EV_N];
-  if (prefs.getBytes("ev", buf, len) != len) return;
+  Tmp<Ev> buf(EV_N);
+  if (!buf.p || prefs.getBytes("ev", buf.p, len) != len) return;
   for (size_t i = 0; i < len / sizeof(Ev); i++) {
     evl[evHead] = buf[i];
     evHead = (evHead + 1) % EV_N;
@@ -403,6 +445,22 @@ void evIncarca() {
   }
 }
 bool mistState = false, fanState = false;
+
+// Senzorul de umiditate pare blocat: arata peste 98% de 45 de minute, sau exact aceeasi valoare de 3 ore.
+// Atunci avertizam (pagina, ecran, Telegram), iar optimizarea nu invata din citirile lui.
+bool umBlocat = false;
+uint8_t umBlocatMotiv = 0;   // 1 = mereu peste 98%, 2 = aceeasi valoare de mult timp
+void umBlocatVerifica() {
+  static unsigned long tSus = 0, tLa = 0; static float hLa = NAN;
+  unsigned long now = millis();
+  if (isnan(hum)) { tSus = 0; tLa = 0; hLa = NAN; umBlocat = false; umBlocatMotiv = 0; return; }
+  if (hum >= 98.0f) { if (!tSus) tSus = now ? now : 1; } else tSus = 0;
+  if (isnan(hLa) || fabsf(hum - hLa) >= 0.05f) { hLa = hum; tLa = now ? now : 1; }
+  bool sus = tSus && now - tSus >= 45UL * 60000UL;
+  bool fix = tLa && now - tLa >= 3UL * 3600000UL;
+  umBlocat = sus || fix;
+  umBlocatMotiv = sus ? 1 : fix ? 2 : 0;
+}
 unsigned long tSenzor = 0;
 
 void valoriImplicite() {
@@ -416,6 +474,20 @@ void valoriImplicite() {
   for (int i = 0; i < 4; i++) S.mod[i] = 0;
   S.plAuto = 1; S.plOra[0] = 540; S.plOra[1] = 780; S.plOra[2] = 1080;   // 09:00, 13:00, 18:00
   S.plDur = 30; S.plMax = 95; S.plVent = 5;
+  S.umAuto = 1; S.umStrict = 3; S.umTinta = 86;
+  umCalc();
+}
+
+// Pragurile calculate din umiditatea dorita H si cat de strict T:
+// ceata porneste sub H-T si se opreste peste H+T; ventilatorul porneste peste H+T+4 si se opreste sub H+T+1
+float umBaza(int p) {
+  int H = S.umTinta, T = S.umStrict, fOn = min(99, H + T + 4);
+  return p == 0 ? H - T : p == 1 ? H + T : p == 2 ? fOn : min(fOn - 2, H + T + 1);
+}
+void umCalc() {
+  S.umTinta = constrain(S.umTinta, 70, 95);
+  S.umStrict = constrain((int)S.umStrict, 2, 4);
+  S.mistOn = umBaza(0); S.mistOff = umBaza(1); S.fanOn = umBaza(2); S.fanOff = umBaza(3);
 }
 
 void salveaza() { prefs.putBytes("s", &S, sizeof(S)); }
@@ -428,7 +500,12 @@ void incarca() {
     if (prefs.getBytes("s", &tmp, n) == n && tmp.ver == VER) S = tmp;
   } else if (n > 0 && n < sizeof(tmp)) {
     // setari salvate de versiunea de dinainte: le pastram, iar campurile noi raman la valorile implicite
-    if (prefs.getBytes("s", &tmp, n) == n && tmp.ver == VER - 1) { tmp.ver = VER; S = tmp; salveaza(); }
+    if (prefs.getBytes("s", &tmp, n) == n && tmp.ver == VER - 1) {
+      tmp.ver = VER; S = tmp;
+      // de la 1.8.7: tinta porneste din pragurile pe care le aveai, ca umiditatea sa ramana cam la fel
+      S.umAuto = 1; S.umStrict = 3; S.umTinta = (int)lroundf((S.mistOn + S.mistOff) / 2);
+      umCalc(); salveaza();
+    }
   }
 }
 
@@ -556,6 +633,8 @@ void logica() {
   if (senzorOk) {
     if (hum < S.mistOn) mistState = true;
     else if (hum > S.mistOff) mistState = false;
+    if (!mistState && optCeataDinTimp(hum)) { mistState = true; ceataDinTimp = true; }   // optimizare: porneste inainte de prag
+    if (!mistState) ceataDinTimp = false;
     if (hum > S.fanOn) fanState = true;
     else if (hum < S.fanOff) fanState = false;
   } else {
@@ -634,7 +713,7 @@ String sysJson() {
   return "{\"v\":\"" VERSIUNE "\",\"up\":" + String(millis() / 1000) + ",\"rssi\":" +
          String(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0) + ",\"rr\":\"" + repMotiv + "\",\"ota\":" + String(otaPosibil() ? 1 : 0) +
          ",\"heap\":" + String(ESP.getFreeHeap() / 1024) + ",\"hmin\":" + String(heapMin == 0xFFFFFFFF ? 0 : heapMin / 1024) +
-         ",\"wc\":" + String(wifiCaderi) + ghJsonScurt() + "}";
+         ",\"wc\":" + String(wifiCaderi) + ghJsonScurt() + optScurt() + "}";
 }
 
 // ---------- actualizare prin WiFi: fisierul .bin trimis din pagina (Setari > Actualizează placa) ----------
@@ -647,6 +726,7 @@ void hUpdateGata() {
     prefs.putUChar("otaOk", 1);
     histSalveaza();
     evSalveaza();
+    optSalveazaZile();
     restartLa = millis() + 1500;
   } else {
     server.send(500, "text/plain", updErr.length() ? updErr : String("Actualizarea nu a mers."));
@@ -681,7 +761,7 @@ void otaStart() {
   ArduinoOTA.setHostname(mdnsNume.c_str());
   ArduinoOTA.setPassword(WEB_PASS);       // aceeasi parola ca pagina (Arduino IDE o cere la Upload)
   ArduinoOTA.setMdnsEnabled(false);       // mDNS il porneste placa; mai jos doar anuntam portul pentru Arduino IDE
-  ArduinoOTA.onStart([]() { histSalveaza(); evSalveaza(); });
+  ArduinoOTA.onStart([]() { histSalveaza(); evSalveaza(); optSalveazaZile(); });
   ArduinoOTA.onProgress([](unsigned int, unsigned int) { esp_task_wdt_reset(); });
   ArduinoOTA.onEnd([]() { prefs.putUChar("otaOk", 1); });
   ArduinoOTA.begin();
@@ -704,6 +784,7 @@ void repornesteCurat(const char* motiv) {
   prefs.putString("rmotiv", motiv);
   histSalveaza();
   evSalveaza();
+  optSalveazaZile();
   h30Salveaza();
   delay(200);
   ESP.restart();
@@ -778,7 +859,8 @@ String setariJson() {   // toate setarile, ca JSON (pagina, copia de rezerva)
   j += ",\"pompaOn\":" + String(S.pompaOn) + ",\"pompaOff\":" + String(S.pompaOff);
   j += ",\"plO1\":" + String(S.plOra[0]) + ",\"plO2\":" + String(S.plOra[1]) + ",\"plO3\":" + String(S.plOra[2]);
   j += ",\"plDur\":" + String(S.plDur) + ",\"plMax\":" + String(S.plMax) + ",\"plVent\":" + String(S.plVent);
-  j += ",\"circLa\":" + String(S.circLa) + ",\"circDur\":" + String(S.circDur) + ",\"standbyMin\":" + String(S.standbyMin) + ",\"ledFanOn\":" + String(S.ledFanOn) + ",\"ledFanMax\":" + String(S.ledFanMax) + ",\"ledCutoff\":" + String(S.ledCutoff) + "}";
+  j += ",\"circLa\":" + String(S.circLa) + ",\"circDur\":" + String(S.circDur) + ",\"standbyMin\":" + String(S.standbyMin) + ",\"ledFanOn\":" + String(S.ledFanOn) + ",\"ledFanMax\":" + String(S.ledFanMax) + ",\"ledCutoff\":" + String(S.ledCutoff);
+  j += ",\"umA\":" + String(S.umAuto) + ",\"umT\":" + String(S.umTinta) + ",\"umS\":" + String(S.umStrict) + "}";
   return j;
 }
 
@@ -805,7 +887,7 @@ Rasp apiStatus(const Arg& a) {
 #endif
   j += ",\"led\":{\"t\":" + (isnan(tLed) ? String("null") : String(tLed, 1)) + ",\"f\":" + String(fanLedPct) + ",\"oh\":" + String(ledOverheat ? 1 : 0) +
        ",\"rpm\":" + String(fanRpm) + ",\"rl\":" + String(fanRpmLive ? 1 : 0) + ",\"ff\":" + String(fanFail ? 1 : 0) +
-       ",\"tach\":" + String(FANLED_TACH ? (FANLED_4PIN || FANLED_ONOFF ? 2 : 1) : 0) + ledSrcJson() + "},\"pl\":" + plJson() + ",\"mem\":" + memJson() + ",\"sys\":" + sysJson() + ",\"vac\":" + String(vacanta ? 1 : 0) + ",\"s\":" + setariJson() + "}";
+       ",\"tach\":" + String(FANLED_TACH ? (FANLED_4PIN || FANLED_ONOFF ? 2 : 1) : 0) + ledSrcJson() + "},\"pl\":" + plJson() + ",\"mem\":" + memJson() + ",\"sys\":" + sysJson() + ",\"vac\":" + String(vacanta ? 1 : 0) + ",\"hb\":" + String(umBlocatMotiv) + ",\"s\":" + setariJson() + "}";
   return Rasp{200, "application/json", j};
 }
 void hStatus() { if (!auth()) return; trimite(apiStatus(Arg{"", true})); }
@@ -837,6 +919,12 @@ Rasp apiSave(const Arg& a) {
   if (a.has("plDur")) S.plDur = constrain((int)a.get("plDur").toInt(), 5, 180);
   if (a.has("plMax")) S.plMax = constrain((int)a.get("plMax").toInt(), 50, 100);
   if (a.has("plVent")) S.plVent = constrain((int)a.get("plVent").toInt(), 0, 30);
+  // umiditatea dorita: cand se schimba, pragurile se calculeaza din nou
+  bool umSch = false;
+  if (a.has("umA")) { uint8_t v = a.get("umA").toInt() ? 1 : 0; if (v != S.umAuto) { S.umAuto = v; umSch = true; } }
+  if (a.has("umT")) { int v = constrain((int)a.get("umT").toInt(), 70, 95); if (v != S.umTinta) { S.umTinta = v; umSch = true; } }
+  if (a.has("umS")) { int v = constrain((int)a.get("umS").toInt(), 2, 4); if (v != S.umStrict) { S.umStrict = v; umSch = true; } }
+  if (umSch && S.umAuto) { umCalc(); optTintaNoua(); }
   bool memSchimbat = false;
   for (int i = 0; i < MEM_N; i++) {
     String k = "m" + String(i);
@@ -1142,6 +1230,8 @@ void wifiLoop() {
 
 void setup() {
   Serial.begin(115200);
+  tlsSem = xSemaphoreCreateBinary();
+  xSemaphoreGive(tlsSem);
 
   // Setam nivelul OPRIT inainte de pinMode, ca sa nu avem pulsuri la pornire
   for (int i = 0; i < 4; i++) {
@@ -1168,6 +1258,7 @@ void setup() {
   h30Incarca();
   memIncarca();
   evIncarca();
+  optIncarca();
   mqIncarca();
   ghIncarca();
   vacanta = prefs.getUChar("vac", 0);
@@ -1210,6 +1301,7 @@ void setup() {
   server.on("/cfg", hCfg);
   server.on("/vac", hVac);
   server.on("/gh", hGh);
+  server.on("/opt", hOpt);
   server.on("/mqttcfg", hMqttCfg);
   server.on("/update", HTTP_POST, hUpdateGata, hUpdateDate);
   server.on("/e", hEv);
@@ -1238,6 +1330,7 @@ void loop() {
   reteaLoop();
   mqLoop();
   ghLoop();
+  optLoop();
   { static unsigned long tEv = 0; if (evSchimbat && millis() - tEv > 600000UL) { tEv = millis(); evSalveaza(); } }
 #if FOLOSESTE_TELEGRAM
   raportLoop();
@@ -1291,6 +1384,7 @@ void loop() {
     } else {
       esecuri = 0; temp = t; hum = h;
     }
+    umBlocatVerifica();
     if ((histCount == 0 && !isnan(temp)) || (histCount > 0 && millis() - tHist >= 300000UL)) {
       tHist = millis();
       inregistreaza();

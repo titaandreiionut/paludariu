@@ -41,6 +41,8 @@ String tgUrl(const char* metoda) { return String("https://api.telegram.org/bot")
 
 bool tgPost(const char* metoda, const String& body) {
   if (!tgConfigurat() || WiFi.status() != WL_CONNECTED) return false;
+  TlsRand rand(30000);            // o singura legatura criptata odata (memoria)
+  if (!rand.ok) return false;
   WiFiClientSecure cl;
   cl.setInsecure();               // fara verificarea certificatului: simplu; mesajele circula tot criptat
   HTTPClient h;
@@ -166,16 +168,25 @@ void tgCitesteComenzi() {
   if (!tgConfigurat() || WiFi.status() != WL_CONNECTED) { vTaskDelay(pdMS_TO_TICKS(3000)); return; }
   char off[24];
   if (pregatit) snprintf(off, sizeof off, "%lld", tgOffset); else strcpy(off, "-1");
-  String url = tgUrl("getUpdates") + "?allowed_updates=%5B%22message%22%5D&timeout=" + (pregatit ? "20" : "0") +
+  // Cu accesul de la distanta conectat, nu mai tinem legatura deschisa (ar ocupa ~40 KB tot timpul):
+  // intrebam scurt si inchidem; tgFir() intreaba din nou peste ~15 s.
+  const char* asteapta = (!pregatit || tgScurt()) ? "0" : mqConfigurat() ? "8" : "20";
+  String url = tgUrl("getUpdates") + "?allowed_updates=%5B%22message%22%5D&timeout=" + asteapta +
                "&offset=" + off;
-  WiFiClientSecure cl;
-  cl.setInsecure();
-  HTTPClient h;
-  h.setTimeout(25000);
-  if (!h.begin(cl, url)) { vTaskDelay(pdMS_TO_TICKS(5000)); return; }
-  int code = h.GET();
-  String body = code == 200 ? h.getString() : String("");
-  h.end();
+  int code;
+  String body;
+  {
+    TlsRand rand(30000);
+    if (!rand.ok) return;
+    WiFiClientSecure cl;
+    cl.setInsecure();
+    HTTPClient h;
+    h.setTimeout(25000);
+    if (!h.begin(cl, url)) { rand.lasa(); vTaskDelay(pdMS_TO_TICKS(5000)); return; }
+    code = h.GET();
+    body = code == 200 ? h.getString() : String("");
+    h.end();
+  }   // legatura s-a inchis: memoria e libera pentru altii
   if (code != 200) { vTaskDelay(pdMS_TO_TICKS(code == 409 ? 30000 : 5000)); return; }
 
   int pos = 0;
@@ -201,6 +212,9 @@ void tgCitesteComenzi() {
   }
 }
 
+// Accesul de la distanta e conectat: Telegram intreaba scurt, din 15 in 15 s, ca placa sa aiba memorie libera.
+bool tgScurt() { return mqConfigurat() && mqttCod() == 2; }
+
 void tgFir(void*) {
   TgMsg m;
   for (;;) {
@@ -212,6 +226,8 @@ void tgFir(void*) {
       vTaskDelay(pdMS_TO_TICKS(1100));                 // Telegram cere maxim un mesaj pe secunda
     }
     tgCitesteComenzi();
+    if (tgScurt())   // pauza, dar mesajele de trimis (alerte) pleaca imediat
+      for (int i = 0; i < 150 && !uxQueueMessagesWaiting(tgQ) && tgScurt(); i++) vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 
@@ -233,7 +249,7 @@ void tg(const String& s) {
 
 // ---------- alertele de pe placa ----------
 // O problema trebuie sa dureze 2 minute inainte de alerta (fara alarme false); la fel si revenirea.
-enum { AL_SENZOR, AL_FRIG, AL_CALD, AL_USCAT, AL_UMED, AL_LEDCALD, AL_LEDSENZ, AL_LEDFAN, AL_N };
+enum { AL_SENZOR, AL_FRIG, AL_CALD, AL_USCAT, AL_UMED, AL_LEDCALD, AL_LEDSENZ, AL_LEDFAN, AL_UMBLOC, AL_N };
 const unsigned long AL_ASTEPTARE = 120000UL;
 bool alActiv[AL_N] = {false};
 unsigned long alDin[AL_N] = {0};
@@ -254,6 +270,7 @@ void verificaAlerte() {
   cond[AL_LEDCALD] = ledOverheat;
   cond[AL_LEDSENZ] = isnan(tLed) && !ledOverheat;
   cond[AL_LEDFAN] = fanFail;
+  cond[AL_UMBLOC] = umBlocat;
 
   unsigned long now = millis();
   for (int i = 0; i < AL_N; i++) {
@@ -300,6 +317,11 @@ void verificaAlerte() {
         tg(cond[i] ? w + "Ventilatorul de răcire al LED-ului nu se învârte (" + String(fanRpm < 0 ? 0 : fanRpm) +
                          " rpm), așa că lumina s-a oprit. Verifică ventilatorul și firul de turație."
                    : ok + "Ventilatorul de răcire se învârte din nou (" + String(fanRpm) + " rpm), lumina merge după program.");
+        break;
+      case AL_UMBLOC:
+        tg(cond[i] ? w + "Senzorul de umiditate pare blocat: " + String(umBlocatMotiv == 1 ? "arată peste 98% de aproape o oră" : "arată aceeași valoare de 3 ore") +
+                         " (" + nr(hum, 1) + "%). Șterge-l de picături și ține-l departe de ceață și de geam. Până își revine, optimizarea nu învață din el."
+                   : ok + "Senzorul de umiditate pare să meargă din nou (" + nr(hum, 0) + "%).");
         break;
     }
   }

@@ -101,7 +101,7 @@ final class AlertChecker {
             }
         }
         Widget.updateAll(c);
-        checkAppUpdate(c);
+        checkAppUpdate(c, 12 * 3600_000L);
         return ok;
     }
 
@@ -124,12 +124,13 @@ final class AlertChecker {
 
     // ---------------- versiune noua a aplicatiei, pe GitHub ----------------
 
-    /** Cel mult o data la 12 ore: daca pe GitHub e o versiune mai noua a aplicatiei, o tinem minte si anuntam. */
-    static void checkAppUpdate(Context c) {
+    /** Daca pe GitHub e o versiune mai noua a aplicatiei, o tinem minte si anuntam.
+     *  In fundal cel mult o data la 12 ore; cand deschizi aplicatia, cel mult o data la 10 minute. */
+    static void checkAppUpdate(Context c, long minMs) {
         SharedPreferences p = Boards.prefs(c);
         String repo = p.getString("gh_repo", "");
         long now = System.currentTimeMillis();
-        if (repo.indexOf('/') <= 0 || now - p.getLong("app_upd_t", 0) < 12 * 3600_000L) return;
+        if (repo.indexOf('/') <= 0 || now - p.getLong("app_upd_t", 0) < minMs) return;
         p.edit().putLong("app_upd_t", now).apply();
         HttpURLConnection con = null;
         try {

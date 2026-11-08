@@ -58,3 +58,17 @@ Actualizarea aplicatiei
 
 Reteaua "Paludariu-Setup"
 - Daca ai pus alta parola cu SETUP_PAROLA in config.h, la "Placa noua" apesi "Am schimbat parola retelei" si o scrii.
+
+
+VERSIUNEA 1.8.8
+- Pagina placii are acum 4 pagini: Acasa, Paludariu (desenul cu aparatele si explicatiile), Istoric, Setari.
+- Widgetul: confortul nu mai tine cont de lampa LED (problemele lampii le vezi in aplicatie si pe Telegram).
+- Actualizari fara APK de mana: instaleaza Obtainium o singura data, adauga github.com/titaandreiionut/paludariu
+  si pune Paludariu.apk la fiecare release, langa fisierele placii.
+
+VERSIUNEA 1.8.7
+- Pagina placii are 3 pagini (Acasa, Istoric, Setari), cu bara jos. Setarile folosite rar sunt in meniul Setari.
+- Butonul Inapoi al telefonului inchide intai pagina de setari deschisa, apoi te duce la Acasa.
+- Widget nou: confortul intr-un inel, temperatura si umiditatea, linia temperaturii pe 24 de ore si
+  4 butoane (pompa, lumina, ceata, ventilator). Daca widgetul vechi arata ciudat dupa actualizare,
+  scoate-l de pe ecran si pune-l din nou (tii apasat pe ecran > Widgeturi > Paludariu).

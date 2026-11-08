@@ -218,7 +218,7 @@ public class MainActivity extends Activity {
         super.onResume();
         renderUpdate();
         new Thread(() -> {
-            AlertChecker.checkAppUpdate(getApplicationContext());
+            AlertChecker.checkAppUpdate(getApplicationContext(), 10 * 60_000L);
             runOnUiThread(this::renderUpdate);
         }).start();
         Sounds.get(this).resumed();

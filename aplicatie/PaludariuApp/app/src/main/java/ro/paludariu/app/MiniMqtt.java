@@ -45,9 +45,16 @@ final class MiniMqtt {
         h = h.trim();
         int s = h.indexOf("://");
         if (s >= 0) h = h.substring(s + 3);
-        while (h.endsWith("/")) h = h.substring(0, h.length() - 1);
+        int sl = h.indexOf('/');
+        if (sl >= 0) h = h.substring(0, sl);
         int c = h.lastIndexOf(':');
-        if (c > 0) return new String[]{h.substring(0, c), h.substring(c + 1)};
+        if (c > 0) {
+            String p = h.substring(c + 1).trim();
+            h = h.substring(0, c).trim();
+            // 1883 / 8083 / 8084 nu sunt porturi pentru legatura criptata directa
+            if (p.isEmpty() || p.equals("1883") || p.equals("8083") || p.equals("8084")) p = "8883";
+            return new String[]{h, p};
+        }
         return new String[]{h, "8883"};
     }
 
