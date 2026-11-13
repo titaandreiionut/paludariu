@@ -101,7 +101,7 @@ const char* TG_AJUTOR =
   "La fel pentru /ceata, /pompa și /ventilator.\n"
   "/ploaie: plouă acum; /ploaie off: oprește ploaia; /ploaie auto sau /ploaie pauza: programul automat\n"
   "on și off pornesc sau opresc manual; auto readuce programul automat.\n"
-  "/intretinere: ce urmează de făcut; /gata hranit (sau geam, apa, ceata, pompa) când ai terminat\n"
+  "/intretinere: ce urmează de făcut; /gata hranit (sau geam, apa, ceata, pompa, membrana, ventilator) când ai terminat\n"
   "/vacanta on, /vacanta off: modul vacanță; /raport: raportul zilei\n"
   "Folosește butoanele de mai jos.";
 
@@ -126,9 +126,9 @@ void tgComanda(String text) {
   if (cmd == "intretinere" || cmd == "mementouri") { TgCmd c = {-2, 0}; xQueueSend(tgCmdQ, &c, 0); return; }
   if (cmd == "raport") { TgCmd c = {-5, 0}; xQueueSend(tgCmdQ, &c, 0); return; }
   if (cmd == "gata" || cmd == "facut") {
-    int k = arg.indexOf("ceata") >= 0 ? 0 : (arg.indexOf("hran") >= 0 || arg.indexOf("crab") >= 0 || arg.indexOf("mancare") >= 0) ? 1
+    int k = arg.indexOf("membr") >= 0 ? 5 : arg.indexOf("ventil") >= 0 ? 6 : arg.indexOf("ceata") >= 0 ? 0 : (arg.indexOf("hran") >= 0 || arg.indexOf("crab") >= 0 || arg.indexOf("mancare") >= 0) ? 1
           : arg.indexOf("geam") >= 0 ? 2 : arg.indexOf("apa") >= 0 ? 3 : arg.indexOf("pomp") >= 0 ? 4 : -1;
-    if (k < 0) { tgTrimiteAcum("Scrie de exemplu /gata hranit, /gata geam, /gata apa, /gata ceata sau /gata pompa."); return; }
+    if (k < 0) { tgTrimiteAcum("Scrie de exemplu /gata hranit, /gata geam, /gata apa, /gata ceata, /gata pompa, /gata membrana sau /gata ventilator."); return; }
     TgCmd c = {-3, (int8_t)k};
     xQueueSend(tgCmdQ, &c, 0);
     return;
@@ -325,6 +325,9 @@ void verificaAlerte() {
         break;
     }
   }
+  // pentru rezumatul de dimineata: problemele confirmate (2 minute). Senzorul radiatorului lipsa nu intra:
+  // e o problema de montaj, anuntata deja pe Telegram, nu ceva din paludariu.
+  for (int i = 0; i < AL_N; i++) if (alActiv[i] && i != AL_LEDSENZ) noapteAlerta(i);
 }
 
 // ---------- comenzile se executa in loop(), langa restul logicii ----------
@@ -364,6 +367,10 @@ void tgExecutaComenzi() {
   while (tgCmdQ && xQueueReceive(tgCmdQ, &c, 0) == pdTRUE) {
     if (c.i == -2) { tg(memTelegram()); continue; }
     if (c.i == -3) {
+      if (c.v == 1) { tg(hranit() ? String("\xE2\x9C\x85 Am notat: ai hrănit crabii azi.") : String("Placa nu știe încă ora. Încearcă peste un minut.")); continue; }
+      if (c.v == 4) { oreGata(1); tg("\xE2\x9C\x85 Am notat: pompa și sita sunt curate. Numărătoarea orelor pornește de la zero."); continue; }
+      if (c.v == 5) { oreGata(0); tg("\xE2\x9C\x85 Am notat: membrana de ceață e curată."); continue; }
+      if (c.v == 6) { oreGata(2); tg("\xE2\x9C\x85 Am notat: ventilatorul lămpii e curat."); continue; }
       if (memGata(c.v)) tg("\xE2\x9C\x85 Am notat: " + String(MEM_NUME[c.v]) + (M.zile[c.v] > 0 ? ". Următoarea dată peste " + String(M.zile[c.v]) + (M.zile[c.v] == 1 ? " zi." : " zile.") : String(".")));
       else tg("Placa nu știe încă ora. Încearcă peste un minut.");
       continue;
@@ -397,7 +404,7 @@ String memTelegram() {
   String s = "\xF0\x9F\x93\x9D Întreținere\n";   // 📝
   bool vreunul = false;
   for (int i = 0; i < MEM_N; i++) {
-    if (M.zile[i] <= 0) continue;
+    if (M.zile[i] <= 0 || memAscuns(i)) continue;
     vreunul = true;
     long r;
     s += "• " + String(MEM_NUME[i]) + ": ";
@@ -406,8 +413,15 @@ String memTelegram() {
     else { long z = (r + 86399L) / 86400L; s += z <= 1 ? String("în următoarele 24 de ore") : "peste " + String(z) + " zile"; }
     s += "\n";
   }
+  for (int k = 0; k < ORE_N; k++) {
+    if (!S.oreLim[k]) continue;
+    vreunul = true;
+    s += "• " + String(ORE_NUME[k]) + ": " + String(O.min[k] / 60) + " / " + String(S.oreLim[k]) + " ore" +
+         (O.min[k] >= (uint32_t)S.oreLim[k] * 60UL ? String(" \xE2\x9A\xA0\xEF\xB8\x8F") : String("")) + "\n";
+  }
+  if (S.hranZile) { vreunul = true; s += String("• Hrănit crabii: ") + (hranitAzi() ? "azi, gata" : "nu încă azi") + "\n"; }
   if (!vreunul) return "\xF0\x9F\x93\x9D Niciun memento pornit. Le pornești din pagina plăcii, la Setări.";
-  return s + "Când termini: /gata hranit (sau geam, apa, ceata, pompa)";
+  return s + "Când termini: /gata hranit (sau geam, apa, ceata, membrana, pompa, ventilator)";
 }
 
 String raportZilnic() {

@@ -93,9 +93,10 @@ public class MainActivity extends Activity {
         Button add = Ui.primary(this, "Adaugă o placă");
         add.setOnClickListener(v -> new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
                 .setTitle("Adaugă o placă")
-                .setItems(new String[]{"Placă nouă: o conectez la WiFi", "Am deja placa în rețea (după adresă)"}, (d, w) -> {
+                .setItems(new String[]{"Placă nouă: o conectez la WiFi", "Am deja placa în rețea (după adresă)", "Am un cod de invitație (doar privit)"}, (d, w) -> {
                     if (w == 0) startActivity(new Intent(this, SetupActivity.class));
-                    else showAddDialog();
+                    else if (w == 1) showAddDialog();
+                    else showInviteDialog();
                 })
                 .show());
         root.addView(add, Ui.wide(this, 18));
@@ -115,6 +116,26 @@ public class MainActivity extends Activity {
         testBtn = Ui.secondary(this, "Trimite o notificare de test");
         testBtn.setOnClickListener(v -> sendTest());
         root.addView(testBtn, Ui.wide(this, 10));
+        // rezumatul de dimineata (1.8.9)
+        rezRow = switchRow("Rezumat de dimineață", "Cum a fost noaptea: temperatura, umiditatea, confortul și de câte ori a pornit ceața",
+                Rezumat.on(this), on -> { Boards.prefs(this).edit().putBoolean(Rezumat.PREF_ON, on).apply(); renderNotif(); });
+        root.addView(rezRow, Ui.wide(this, 12));
+        rezOra = Ui.secondary(this, "");
+        rezOra.setOnClickListener(v -> pickRezOra());
+        root.addView(rezOra, Ui.wide(this, 8));
+        rezNow = Ui.secondary(this, "Trimite rezumatul acum");
+        rezNow.setOnClickListener(v -> {
+            rezNow.setEnabled(false);
+            rezNow.setText("Întreb plăcile…");
+            new Thread(() -> {
+                int n = Rezumat.sendNow(getApplicationContext());
+                runOnUiThread(() -> {
+                    rezNow.setEnabled(true);
+                    rezNow.setText(n > 0 ? "Trimite rezumatul acum" : "Nicio placă n-a răspuns. Mai încearcă");
+                });
+            }).start();
+        });
+        root.addView(rezNow, Ui.wide(this, 8));
 
         // Sunete
         root.addView(section("Sunete", 30));
@@ -247,6 +268,73 @@ public class MainActivity extends Activity {
                 : "Oprite. Pornește-le ca să afli de probleme fără să deschizi aplicația.");
         notifBtn.setText(on ? "Oprește notificările" : "Pornește notificările");
         testBtn.setVisibility(on ? View.VISIBLE : View.GONE);
+        if (rezRow != null) {
+            rezRow.setVisibility(on ? View.VISIBLE : View.GONE);
+            boolean r = on && Rezumat.on(this);
+            rezOra.setVisibility(r ? View.VISIBLE : View.GONE);
+            rezNow.setVisibility(r ? View.VISIBLE : View.GONE);
+            rezOra.setText(String.format(java.util.Locale.US, "Rezumatul vine la %02d:00 · schimbă ora", Rezumat.ora(this)));
+        }
+    }
+
+    private View rezRow;
+    private Button rezOra, rezNow;
+
+    private void pickRezOra() {
+        String[] ore = {"06:00", "07:00", "08:00", "09:00", "10:00", "11:00"};
+        int cur = Math.max(0, Math.min(5, Rezumat.ora(this) - 6));
+        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                .setTitle("Ora rezumatului")
+                .setSingleChoiceItems(ore, cur, (d, w) -> {
+                    Boards.prefs(this).edit().putInt(Rezumat.PREF_ORA, 6 + w).apply();
+                    d.dismiss();
+                    renderNotif();
+                })
+                .show();
+    }
+
+    /** Familia: lipeste codul primit de la proprietar si placa apare in lista, doar pentru privit. */
+    private void showInviteDialog() {
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        int p = Ui.dp(this, 20);
+        form.setPadding(p, Ui.dp(this, 8), p, 0);
+        EditText code = Ui.input(this, "Lipește aici mesajul cu codul");
+        code.setMinLines(3);
+        code.setSingleLine(false);
+        TextView err = Ui.text(this, "Codul începe cu PALV1:. Poți lipi tot mesajul primit.", 13, Ui.MUTED, false);
+        form.addView(code, Ui.wide(this, 0));
+        form.addView(err, Ui.wide(this, 8));
+        try {
+            android.content.ClipboardManager cb = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (cb != null && cb.hasPrimaryClip() && cb.getPrimaryClip().getItemCount() > 0) {
+                CharSequence t = cb.getPrimaryClip().getItemAt(0).getText();
+                if (t != null && t.toString().contains(Invitatie.PREFIX)) code.setText(t);
+            }
+        } catch (Exception ignored) { }
+        AlertDialog d = new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                .setTitle("Cod de invitație")
+                .setView(form)
+                .setPositiveButton("Adaugă placa", null)
+                .setNegativeButton("Renunță", null)
+                .create();
+        d.setOnShowListener(x -> d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            org.json.JSONObject j = Invitatie.decode(code.getText().toString());
+            if (j == null) {
+                err.setTextColor(Ui.BAD);
+                err.setText("Nu găsesc un cod bun. Cere o invitație nouă și lipește tot mesajul.");
+                return;
+            }
+            String name = Invitatie.apply(this, j);
+            renderSaved();
+            d.dismiss();
+            new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                    .setTitle("Gata")
+                    .setMessage("„" + name + "” e în lista ta. Poți vedea tot, dar nu poți porni sau opri nimic."
+                            + (j.optString("k").isEmpty() ? " Merge doar pe WiFi-ul unde e placa." : " Merge și de acasă de la tine, prin internet."))
+                    .setPositiveButton("OK", null).show();
+        }));
+        d.show();
     }
 
     private void toggleNotifications() {

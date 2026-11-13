@@ -40,6 +40,7 @@ import java.util.Locale;
 public class BoardActivity extends Activity {
     static final String EXTRA_URL = "url";
     static final String EXTRA_NAME = "name";
+    static final String EXTRA_HASH = "hash";   // pagina de deschis (ex. "istoric", din rezumatul de dimineata)
 
     private WebView web;
     private volatile String url;
@@ -314,6 +315,129 @@ public class BoardActivity extends Activity {
         public void retry() {
             ui.post(BoardActivity.this::goOnline);
         }
+
+        // ---------- 1.8.9: jurnalul foto (pozele stau in telefon) ----------
+        @JavascriptInterface
+        public String fotoList() { return Foto.list(BoardActivity.this, boardKey()); }
+
+        @JavascriptInterface
+        public String fotoImg(String id) { return Foto.image(BoardActivity.this, boardKey(), id); }
+
+        @JavascriptInterface
+        public void fotoDel(String id) { Foto.delete(BoardActivity.this, boardKey(), id); }
+
+        @JavascriptInterface
+        public void fotoAdd(String temp, String hum) { ui.post(() -> fotoPick(temp, hum)); }
+
+        // ---------- 1.8.9: copiile automate ale setarilor ----------
+        @JavascriptInterface
+        public String bkInfo() { return Copii.info(BoardActivity.this, boardKey()); }
+
+        @JavascriptInterface
+        public void bkSet(int on) { Copii.setOn(BoardActivity.this, boardKey(), on != 0); }
+
+        @JavascriptInterface
+        public void bkSave(String json) { Copii.save(BoardActivity.this, boardKey(), json, false); }
+
+        @JavascriptInterface
+        public String bkGet(String name) { String t = Copii.read(BoardActivity.this, boardKey(), name); return t == null ? "" : t; }
+
+        // ---------- 1.8.9: invitatia "doar privit" ----------
+        @JavascriptInterface
+        public void invite(String viewPass) { if (viewPass != null && !viewPass.isEmpty()) makeInvite(viewPass); }
+    }
+
+    // ---------------- jurnal foto: camera sau galerie ----------------
+    private static final int REQ_FOTO = 13;
+    private Uri camUri;
+    private String fotoT, fotoH;
+
+    private void fotoPick(String temp, String hum) {
+        fotoT = temp; fotoH = hum;
+        android.content.Intent gal = new android.content.Intent(android.content.Intent.ACTION_GET_CONTENT);
+        gal.setType("image/*");
+        gal.addCategory(android.content.Intent.CATEGORY_OPENABLE);
+        android.content.Intent ch = android.content.Intent.createChooser(gal, "Poză pentru jurnal");
+        camUri = null;
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            // camera scrie poza direct in galerie (Pictures/Paludariu); de acolo o copiem in jurnal
+            try {
+                android.content.ContentValues v = new android.content.ContentValues();
+                v.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "paludariu_" + System.currentTimeMillis() + ".jpg");
+                v.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+                v.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Paludariu");
+                camUri = getContentResolver().insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
+            } catch (Exception e) {
+                camUri = null;
+            }
+            if (camUri != null) {
+                android.content.Intent cam = new android.content.Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE);
+                cam.putExtra(android.provider.MediaStore.EXTRA_OUTPUT, camUri);
+                cam.addFlags(android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION | android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                ch.putExtra(android.content.Intent.EXTRA_INITIAL_INTENTS, new android.content.Intent[]{cam});
+            }
+        }
+        try {
+            startActivityForResult(ch, REQ_FOTO);
+        } catch (Exception e) {
+            dropCam();
+        }
+    }
+
+    private void dropCam() {
+        if (camUri != null) try { getContentResolver().delete(camUri, null, null); } catch (Exception ignored) { }
+        camUri = null;
+    }
+
+    private void fotoResult(int res, android.content.Intent data) {
+        Uri src = data != null ? data.getData() : null;
+        boolean cam = camUri != null && (src == null || src.equals(camUri));
+        if (res != RESULT_OK || (src == null && !cam)) { dropCam(); return; }
+        if (cam) src = camUri;
+        else dropCam();               // a ales din galerie: locul pregatit pentru camera nu mai trebuie
+        camUri = null;
+        final Uri f = src;
+        final String board = boardKey();
+        new Thread(() -> {
+            boolean ok = Foto.add(this, board, f, fotoT, fotoH);
+            ui.post(() -> {
+                if (ok) web.evaluateJavascript("window.fotoGata&&fotoGata()", null);
+                else android.widget.Toast.makeText(this, "Nu am putut citi poza.", android.widget.Toast.LENGTH_LONG).show();
+            });
+        }).start();
+    }
+
+    // ---------------- invitatia "doar privit" ----------------
+    private void makeInvite(String viewPass) {
+        new Thread(() -> {
+            String board = boardKey();
+            Remote.Cfg rc = Remote.load(this, board);
+            String key2 = null;
+            String nota = "";
+            if (rc.ok()) {
+                String saved = prefs.getString("rm_" + board + "_key2", "");
+                String k = saved.length() == 64 ? saved : Remote.newKeyHex();
+                String r = null;
+                // cheia ajunge la placa doar pe WiFi-ul de acasa (niciodata prin internet)
+                if (!remote) try { r = AlertChecker.get(this, url, "/privit?key=" + k); } catch (Exception ignored) { }
+                if (r != null) { key2 = k; prefs.edit().putString("rm_" + board + "_key2", k).apply(); }
+                else if (saved.length() == 64) key2 = saved;   // placa o are deja de data trecuta
+                else nota = "\n\n(Invitația merge doar pe WiFi-ul meu. Pentru acces prin internet, o fac din nou când sunt acasă.)";
+            }
+            String code;
+            try { code = Invitatie.encode(getIntent().getStringExtra(EXTRA_NAME) == null ? board : getIntent().getStringExtra(EXTRA_NAME), url, viewPass, rc, key2); }
+            catch (Exception e) { return; }
+            String text = "\uD83E\uDD80 Te invit să vezi paludariul meu („" + board + "”). Poți vedea tot, dar nu poți porni sau opri nimic.\n"
+                    + "1. Instalează aplicația Paludariu.\n2. Apasă „Adaugă o placă” → „Am un cod de invitație” și lipește tot mesajul ăsta.\n\n"
+                    + code + (rc.ok() ? nota : "\n\n(Merge doar pe WiFi-ul unde e placa.)");
+            ui.post(() -> {
+                android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_SEND);
+                i.setType("text/plain");
+                i.putExtra(android.content.Intent.EXTRA_TEXT, text);
+                try { startActivity(android.content.Intent.createChooser(i, "Trimite invitația (doar familiei)")); } catch (Exception ignored) { }
+                web.evaluateJavascript("window.pvGata&&pvGata()", null);
+            });
+        }).start();
     }
 
     private long widgetT = 0;
@@ -358,6 +482,7 @@ public class BoardActivity extends Activity {
     @Override
     protected void onActivityResult(int req, int res, android.content.Intent data) {
         super.onActivityResult(req, res, data);
+        if (req == REQ_FOTO) { fotoResult(res, data); return; }
         if (req == REQ_SAVE) {
             Uri u = (res == RESULT_OK && data != null) ? data.getData() : null;
             String text = pendingSave;
@@ -508,7 +633,8 @@ public class BoardActivity extends Activity {
     }
 
     private static final java.util.Set<String> REMOTE_PATHS = new java.util.HashSet<>(java.util.Arrays.asList(
-            "/s", "/h", "/h30", "/e", "/m", "/save", "/pl", "/mem", "/cfg", "/vac", "/gh", "/tgtest", "/opt"));
+            "/s", "/h", "/h30", "/e", "/m", "/save", "/pl", "/mem", "/cfg", "/vac", "/gh", "/tgtest", "/opt",
+            "/hran", "/fan", "/noapte", "/privit"));
 
     /** O cerere a paginii, trimisa placii prin internet. */
     private WebResourceResponse remoteResponse(Uri u) {
@@ -642,7 +768,7 @@ public class BoardActivity extends Activity {
                 + "b.querySelector('button').onclick=function(){window.PaludariuApp&&PaludariuApp.retry()};"
                 + "function no(){if(b.className=='con')return;var s=b.querySelector('span');s.textContent='Placa e offline, comenzile nu pot fi trimise acum.';"
                 + "setTimeout(function(){s.textContent=OFF},3500)}"
-                + "['mod','salv','plCmd','tgTest','memGata','upload','optCmd'].forEach(function(f){window[f]=function(){no();return Promise.resolve()}});"
+                + "['mod','salv','plCmd','tgTest','memGata','upload','optCmd','oreGata','hrFed','hrAdd','hrDel','hrZi','hrOra','fanAuto','fanTest','pvToggle','pvNew','pvInvite','bkPune','bkAcum'].forEach(function(f){window[f]=function(){no();return Promise.resolve()}});"
                 + "})();</script>";
         int end = html.lastIndexOf("</body>");
         html = end >= 0 ? html.substring(0, end) + inject + html.substring(end) : html + inject;
@@ -676,7 +802,13 @@ public class BoardActivity extends Activity {
     private class Client extends WebViewClient {
         @Override
         public void onPageFinished(WebView view, String u) {
-            triedSaved = false;   // pagina s-a incarcat: urmatoarea cerere de parola incearca iar parola salvata
+            triedSaved = false;
+            String hash = getIntent().getStringExtra(EXTRA_HASH);
+            if (hash != null && u != null && !u.startsWith("data:") && !u.startsWith("about:")) {
+                getIntent().removeExtra(EXTRA_HASH);
+                String h = hash.replaceAll("[^a-z]", "");
+                view.evaluateJavascript("(function(){try{var i=PG.indexOf('" + h + "');if(i>0)setTimeout(function(){go(i,1)},300)}catch(e){}})()", null);
+            }   // pagina s-a incarcat: urmatoarea cerere de parola incearca iar parola salvata
             if (offline && cachedShown) view.evaluateJavascript("window.__offSet&&__offSet(" + bannerConnecting + ")", null);
             if ((offline && !remote) || u == null) return;
             Uri pu = Uri.parse(u);

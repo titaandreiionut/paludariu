@@ -74,6 +74,7 @@ const float NTC_CORECTIE = 0;    // grade adaugate la citire, pentru reglaj fin
 // ---------- ECRAN TFT ----------
 #define FOLOSESTE_DISPLAY false  // true = ai montat ecranul ILI9341 si ai instalat bibliotecile
 #define DISPLAY_ST7789 false     // true = ecran ST7789 (fara touch)
+#define DISPLAY_INVERT false     // true = daca ecranul arata culorile inversate (negru apare alb)
 #define FOLOSESTE_TOUCH true     // touch XPT2046 (ILI9341 cu touch)
 // Calibrare touch: pune TOUCH_DEBUG true, atinge colturile si copiaza aici valorile din Serial Monitor.
 #define TOUCH_DEBUG false

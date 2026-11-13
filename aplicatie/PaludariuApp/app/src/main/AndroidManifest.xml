@@ -28,7 +28,20 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- 1.8.9: butoanele rapide din meniul iconitei (tii apasat pe Paludariu) -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
+
+        <!-- 1.8.9: butoanele rapide (widgetul mic si meniul iconitei): trimite comanda, fara sa deschida ecranul -->
+        <activity
+            android:name=".Rapid"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <activity
             android:name=".BoardActivity"
@@ -56,6 +69,18 @@
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/widget_info" />
+        </receiver>
+        <!-- 1.8.9: widgetul cu 4 butoane rapide -->
+        <receiver
+            android:name=".WidgetRapid"
+            android:exported="true"
+            android:label="Paludariu · butoane rapide">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_rapid_info" />
         </receiver>
     </application>
 </manifest>

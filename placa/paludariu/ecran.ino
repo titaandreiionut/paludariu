@@ -7,6 +7,9 @@
 //   3 Praguri   4 Timpi
 // Standby: dupa S.standbyMin minute fara atingere: acvariu cu ora, pesti si bule, lumina de fundal scazuta.
 // Pe Acasa: atingi un card = ON/OFF manual; tii apasat (~1 s) = revine la AUTO.
+#ifndef DISPLAY_INVERT
+#define DISPLAY_INVERT false   // true = culorile ecranului apar inversate (se pune in config.h)
+#endif
 #if FOLOSESTE_DISPLAY
 #define C565(r,g,b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | (((b) & 0xFF) >> 3)))
 const uint16_t cBG = C565(11,22,16), cCARD = C565(19,37,27), cLINE = C565(42,72,52), cTXT = C565(232,241,231),
@@ -689,6 +692,14 @@ void displayInit() {
   tft.init(240, 320, TFT_SPI_MODE);
 #else
   tft.begin();
+#endif
+#if DISPLAY_INVERT
+  // unele ecrane au culorile inversate (negru apare alb): DISPLAY_INVERT true in config.h le intoarce
+#if DISPLAY_ST7789
+  tft.invertDisplay(false);
+#else
+  tft.invertDisplay(true);
+#endif
 #endif
   tft.setRotation(0);
   tft.fillScreen(cBG);

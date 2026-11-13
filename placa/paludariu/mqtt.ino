@@ -193,14 +193,14 @@ void mqStart() {
 }
 
 // ---------- criptarea cap-coada: nonce (12) | text criptat | eticheta (16) ----------
-bool mqDecripteaza(const uint8_t* d, int n, const String& aad, String& out) {
+bool mqDecripteaza(const uint8_t* d, int n, const String& aad, String& out, const uint8_t* cheie) {
   if (n < 12 + 16 + 2) return false;
   int clen = n - 28;
   uint8_t* pt = (uint8_t*)malloc(clen + 1);
   if (!pt) return false;
   mbedtls_gcm_context g;
   mbedtls_gcm_init(&g);
-  int r = mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, mqKey, 256);
+  int r = mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, cheie, 256);
   if (!r) r = mbedtls_gcm_auth_decrypt(&g, clen, d, 12, (const uint8_t*)aad.c_str(), aad.length(), d + 12 + clen, 16, d + 12, pt);
   mbedtls_gcm_free(&g);
   if (r) { free(pt); return false; }
@@ -210,7 +210,7 @@ bool mqDecripteaza(const uint8_t* d, int n, const String& aad, String& out) {
   return true;
 }
 
-uint8_t* mqCripteaza(const String& plain, const String& aad, size_t& outLen) {
+uint8_t* mqCripteaza(const String& plain, const String& aad, size_t& outLen, const uint8_t* cheie) {
   size_t n = plain.length();
   outLen = 12 + n + 16;
   uint8_t* o = (uint8_t*)malloc(outLen);
@@ -218,7 +218,7 @@ uint8_t* mqCripteaza(const String& plain, const String& aad, size_t& outLen) {
   esp_fill_random(o, 12);
   mbedtls_gcm_context g;
   mbedtls_gcm_init(&g);
-  int r = mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, mqKey, 256);
+  int r = mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, cheie, 256);
   if (!r) r = mbedtls_gcm_crypt_and_tag(&g, MBEDTLS_GCM_ENCRYPT, n, o, 12, (const uint8_t*)aad.c_str(), aad.length(),
                                         (const uint8_t*)plain.c_str(), o + 12, 16, o + 12 + n);
   mbedtls_gcm_free(&g);
@@ -247,6 +247,8 @@ Rasp apiCerere(const String& cale) {
   int qi = cale.indexOf('?');
   String p = qi < 0 ? cale : cale.substring(0, qi);
   Arg a{qi < 0 ? String("") : cale.substring(qi + 1), false};
+  // "doar privit": numai citire
+  if (nivelCerere == 1 && !privitPermis(p, a.q.length() == 0)) return Rasp{403, "text/plain; charset=utf-8", "Ai acces doar să privești: nu poți schimba nimic."};
   if (p == "/s") return apiStatus(a);
   if (p == "/h") return apiHist(a);
   if (p == "/h30") return apiHist30(a);
@@ -259,6 +261,10 @@ Rasp apiCerere(const String& cale) {
   if (p == "/vac") return apiVac(a);
   if (p == "/gh") return apiGh(a);
   if (p == "/opt") return apiOpt(a);
+  if (p == "/hran") return apiHran(a);
+  if (p == "/fan") return apiFan(a);
+  if (p == "/noapte") return apiNoapte(a);
+  if (p == "/privit") return apiPrivit(a, false);
 #if FOLOSESTE_TELEGRAM
   if (p == "/tgtest") return apiTgTest(a);
 #endif
@@ -267,7 +273,13 @@ Rasp apiCerere(const String& cale) {
 
 void mqServeste(const uint8_t* d, int n) {
   String cer;
-  if (!mqDecripteaza(d, n, tCer, cer)) return;   // nu e de la aplicatia noastra (cheie gresita sau modificat pe drum)
+  // cheia proprietarului; altfel cheia "doar privit" (familia)
+  const uint8_t* cheie = mqKey;
+  uint8_t niv = 0;
+  if (!mqDecripteaza(d, n, tCer, cer, mqKey)) {
+    if (!mqCheie2 || !mqDecripteaza(d, n, tCer, cer, mqKey2)) return;   // nu e de la aplicatia noastra (cheie gresita sau modificat pe drum)
+    cheie = mqKey2; niv = 1;
+  }
   String id = jCamp(cer, "n");
   long t = jCamp(cer, "t").toInt();
   String cale = jCamp(cer, "p");
@@ -283,7 +295,12 @@ void mqServeste(const uint8_t* d, int n) {
   else {
     // un raspuns mare (grafice, istoric) ocupa de ~3 ori marimea lui cat il criptam; fara loc, raspundem scurt
     if (ESP.getMaxAllocHeap() < 24000) r = Rasp{503, "text/plain; charset=utf-8", "Placa are prea puțină memorie liberă acum. Mai încearcă peste câteva secunde."};
-    else r = apiCerere(cale);
+    else {
+      nivelCerere = niv;
+      if (niv) vizNoteaza(2);
+      r = apiCerere(cale);
+      nivelCerere = 0;
+    }
     if (r.cod == 200 && (size_t)ESP.getMaxAllocHeap() < r.corp.length() * 2 + 8000)
       r = Rasp{503, "text/plain; charset=utf-8", "Placa are prea puțină memorie liberă acum. Mai încearcă peste câteva secunde."};
   }
@@ -293,7 +310,7 @@ void mqServeste(const uint8_t* d, int n) {
   plain += r.corp;
   r.corp = String();   // eliberam copia inainte de criptare
   size_t len;
-  uint8_t* o = mqCripteaza(plain, tRasp, len);
+  uint8_t* o = mqCripteaza(plain, tRasp, len, cheie);
   if (!o) return;
   if (mqCli) esp_mqtt_client_publish(mqCli, tRasp.c_str(), (const char*)o, len, 0, 0);
   free(o);

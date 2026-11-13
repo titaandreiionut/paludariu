@@ -5,7 +5,7 @@
 // DATELE TALE (WiFi, parole, Telegram, Tuya, relee, senzori) stau in config.h, in acelasi folder.
 // Cand primesti o versiune noua, inlocuiesti toate fisierele din folder, mai putin config.h.
 #include "config.h"
-#define VERSIUNE "1.8.8"
+#define VERSIUNE "1.8.9"
 struct Arg; struct Rasp;   // cererile paginii (vezi mai jos)
 struct ZiOpt; struct OptMed; struct Sfat;   // optimizare.ino
 extern bool ceataDinTimp;
@@ -103,7 +103,6 @@ const int PIN_FANLED = 22;   // PWM catre ventilatorul radiatorului (pinul PWM a
 #define FANLED_CH 2          // canal PWM (ESP32 Arduino core 2.x); nu-l pune pe 0/1, folosite de lumina ecranului
 #define FANLED_FREQ 25000    // 25 kHz = standardul ventilatoarelor PC cu 4 fire
 #define FANLED_ONOFF false   // true = ventilator comandat prin SSR/releu: doar pornit/oprit, fara reglare de viteza
-const int FANLED_MIN = 30;   // procentul minim cat timp ventilatorul merge (mai jos se poate bloca)
 // Turatia ventilatorului (firul galben, "tach") pe GPIO35, cu rezistenta 10 kohm intre GPIO35 si 3V3.
 // Optiunile se pun in config.h; daca lipsesc de acolo, se folosesc valorile de mai jos.
 #ifndef FANLED_TACH
@@ -146,9 +145,15 @@ struct Setari {
   uint8_t umAuto;            // 1 = pragurile se calculeaza singure din umTinta
   uint8_t umStrict;          // cat de strict: 2, 3 sau 4 (%)
   int umTinta;               // umiditatea dorita (70-95 %)
+  // 1.8.9
+  uint8_t ledFanMin;         // viteza minima a ventilatorului lampii cat timp merge (0-60 %)
+  uint8_t hranZile;          // zilele de hranire (biti: luni = 1 ... duminica = 64)
+  uint8_t hranOra;           // ora mementoului de hranire (0-23)
+  uint8_t rez1;
+  uint16_t oreLim[3];        // intretinere dupa ore: membrana ceata, pompa + sita, ventilator lampa (0 = oprit)
 };
 Setari S;
-const uint8_t VER = 6;
+const uint8_t VER = 7;
 
 Preferences prefs;
 WebServer server(80);
@@ -156,13 +161,29 @@ WebServer server(80);
 // Parola paginii. Dupa 5 parole gresite la rand, placa nu mai primeste incercari 30 de secunde.
 uint8_t authEsec = 0;
 unsigned long authBlocT = 0;
+// "Doar privit" (privit.ino): a doua parola, pentru familie
+String vPass = "";              // parola "doar privit" (goala = oprit)
+uint8_t mqKey2[32];             // cheia lor pentru internet
+bool mqCheie2 = false;
+uint32_t vizUlt = 0;            // ultima lor vizita (epoch)
+uint8_t vizCale = 0;            // 1 = prin WiFi, 2 = prin internet
+uint8_t nivelCerere = 0;        // cererea de acum: 0 = proprietarul, 1 = doar privit
+bool privitPermis(const String& p, bool faraArgs);
+void vizNoteaza(uint8_t cale);
 bool auth() {
+  nivelCerere = 0;
   if (authBlocT && millis() - authBlocT < 30000UL) {
     server.send(429, "text/plain; charset=utf-8", "Prea multe parole greșite. Încearcă din nou peste 30 de secunde.");
     return false;
   }
   authBlocT = 0;
   if (server.authenticate(WEB_USER, WEB_PASS)) { authEsec = 0; return true; }
+  if (vPass.length() && server.authenticate("privit", vPass.c_str())) {
+    authEsec = 0; nivelCerere = 1; vizNoteaza(1);
+    if (privitPermis(server.uri(), server.args() == 0)) return true;
+    server.send(403, "text/plain; charset=utf-8", "Ai acces doar să privești: nu poți schimba nimic.");
+    return false;
+  }
   if (server.hasHeader("Authorization") && ++authEsec >= 5) {   // a trimis o parola si a gresit-o
     authEsec = 0; authBlocT = millis() ? millis() : 1;
     server.send(429, "text/plain; charset=utf-8", "Prea multe parole greșite. Încearcă din nou peste 30 de secunde.");
@@ -362,6 +383,28 @@ String memJson() {
   return j + "]";
 }
 void logEvM(int i, bool on, uint8_t man);
+// rezumatul noptii (noapte.ino)
+struct Noapte {
+  uint32_t start;             // cand a inceput noaptea (epoch); 0 = nimic adunat
+  uint32_t gata;              // cand s-a inchis (epoch)
+  int16_t tMin, tMax, hMin, hMax;   // x10
+  uint32_t tMinT;             // la ce ora a fost cel mai frig
+  uint32_t cfSum, cfN;        // confortul, adunat la fiecare citire
+  uint16_t ceata;             // porniri de ceata
+  uint16_t alerte;            // biti AL_... (telegram.ino)
+  uint8_t rep;                // reporniri in timpul noptii
+  uint8_t rez[3];
+};
+
+void noapteGol(Noapte& x);
+String noapteJson(const Noapte& x, bool inCurs);
+// intretinere dupa ore de mers (intretinere.ino)
+const int ORE_N = 3;
+struct Ore { uint32_t min[ORE_N]; uint32_t ult[ORE_N]; uint32_t anuntat[ORE_N]; };   // minute de mers, ultima curatare, ultimul memento
+extern Ore O;
+String oreJson();
+bool oreGata(int k);
+void oreSalveaza();
 bool memGata(int i) {
   time_t n = time(nullptr);
   if (i < 0 || i >= MEM_N || n < 1000000000) return false;
@@ -414,6 +457,7 @@ bool evSchimbat = false;      // jurnalul are intrari noi, nesalvate inca
 void logEvM(int i, bool on, uint8_t man) {
   evSchimbat = true;
   if (i < 5) optEveniment(i, on);
+  if (i == 2 && on) noapteCeata();
   Ev& e = evl[evHead];
   e.t = acum(); e.out = i; e.on = on; e.man = man;
   e.h = isnan(hum) ? -1 : (int16_t)lroundf(hum * 10);
@@ -475,6 +519,8 @@ void valoriImplicite() {
   S.plAuto = 1; S.plOra[0] = 540; S.plOra[1] = 780; S.plOra[2] = 1080;   // 09:00, 13:00, 18:00
   S.plDur = 30; S.plMax = 95; S.plVent = 5;
   S.umAuto = 1; S.umStrict = 3; S.umTinta = 86;
+  S.ledFanMin = 30; S.hranZile = 1 | 4 | 16; S.hranOra = 19; S.rez1 = 0;   // luni, miercuri, vineri, seara
+  S.oreLim[0] = 300; S.oreLim[1] = 500; S.oreLim[2] = 2000;
   umCalc();
 }
 
@@ -500,11 +546,12 @@ void incarca() {
     if (prefs.getBytes("s", &tmp, n) == n && tmp.ver == VER) S = tmp;
   } else if (n > 0 && n < sizeof(tmp)) {
     // setari salvate de versiunea de dinainte: le pastram, iar campurile noi raman la valorile implicite
-    if (prefs.getBytes("s", &tmp, n) == n && tmp.ver == VER - 1) {
+    if (prefs.getBytes("s", &tmp, n) == n && (tmp.ver == VER - 1 || tmp.ver == VER - 2)) {
+      bool din187 = tmp.ver == VER - 2;
       tmp.ver = VER; S = tmp;
       // de la 1.8.7: tinta porneste din pragurile pe care le aveai, ca umiditatea sa ramana cam la fel
-      S.umAuto = 1; S.umStrict = 3; S.umTinta = (int)lroundf((S.mistOn + S.mistOff) / 2);
-      umCalc(); salveaza();
+      if (din187) { S.umAuto = 1; S.umStrict = 3; S.umTinta = (int)lroundf((S.mistOn + S.mistOff) / 2); umCalc(); }
+      salveaza();
     }
   }
 }
@@ -562,11 +609,18 @@ void IRAM_ATTR tachIsr() {
 int fanAplicat = -1;                 // viteza trimisa efectiv ventilatorului
 unsigned long fanPornitT = 0;        // cand a pornit (sau a trecut la 100%): asteptam sa prinda turatie
 bool fanTest = false;                // test in curs (ventilator cu 3 fire)
+// 1.8.9: viteza aleasa de mana (revine pe automat dupa o ora) si proba de 10 secunde la maxim
+int fanMan = -1;                     // -1 = automat, altfel 0-100 %
+unsigned long fanManT = 0;
+const unsigned long FAN_MAN_MS = 3600000UL;
+bool fanProba = false;
+unsigned long fanProbaT = 0;
+int fanProbaRpm = -2;                // -2 = nefacuta, -1 = fara fir de turatie, altfel rpm
 unsigned long fanTestT0 = 0, fanTestUltim = 0, tachT = 0;
 int tachRau = 0, tachBun = 0;
 
 void fanAplica() {
-  int p = (fanTest || fanFail) ? 100 : fanLedPct;
+  int p = (fanTest || fanFail || fanProba) ? 100 : fanLedPct;
   if (FANLED_ONOFF && p > 0) p = 100;
   if (p == fanAplicat) return;
   if ((fanAplicat <= 0 && p > 0) || (p == 100 && fanAplicat != 100)) fanPornitT = millis();
@@ -607,20 +661,80 @@ void tachLoop() {
 #endif
 }
 
+int fanAuto = 0;                     // ce ar alege automatul acum
 void controlLed() {
+  int mn = constrain((int)S.ledFanMin, 0, 60);
   if (isnan(tLed)) {
-    fanLedPct = 100;                       // senzor lipsa: ventilatorul merge la maxim (siguranta)
+    fanAuto = 100;                         // senzor lipsa: ventilatorul merge la maxim (siguranta)
   } else {
     float on = S.ledFanOn, mx = S.ledFanMax;
     if (mx <= on) mx = on + 1;
-    if (tLed >= mx) fanLedPct = 100;
-    else if (tLed >= on) fanLedPct = FANLED_MIN + (int)((100 - FANLED_MIN) * (tLed - on) / (mx - on));
-    else if (fanLedPct > 0 && tLed > on - 3) fanLedPct = FANLED_MIN;   // histerezis 3 grade
-    else fanLedPct = 0;
+    if (tLed >= mx) fanAuto = 100;
+    else if (tLed >= on) fanAuto = mn + (int)((100 - mn) * (tLed - on) / (mx - on));
+    else if (fanAuto > 0 && tLed > on - 3) fanAuto = mn;   // histerezis 3 grade
+    else fanAuto = 0;
     if (tLed >= S.ledCutoff) ledOverheat = true;                        // supraincalzire: opreste lumina
     else if (tLed <= S.ledCutoff - 10) ledOverheat = false;
   }
+  fanLedPct = fanAuto;
+  // viteza de mana: o ora, apoi inapoi pe automat. Siguranta ramane: radiator la "viteza maxima" sau supraincalzit = 100 %
+  if (fanMan >= 0 && millis() - fanManT >= FAN_MAN_MS) fanMan = -1;
+  if (fanMan >= 0) {
+    bool fierbinte = !isnan(tLed) && (tLed >= S.ledFanMax || ledOverheat);
+    if (!fierbinte) fanLedPct = fanMan;
+  }
   fanAplica();
+}
+// proba de 10 secunde la maxim: se masoara turatia (daca firul de turatie e legat)
+void fanLoop() {
+  if (!fanProba) return;
+  if (FANLED_TACH && fanRpmLive && millis() - fanProbaT >= 5000 && fanRpm > fanProbaRpm) fanProbaRpm = fanRpm;
+  if (millis() - fanProbaT < 10000) return;
+  fanProba = false;
+  if (!FANLED_TACH) fanProbaRpm = -1;
+  else if (fanProbaRpm < 0) fanProbaRpm = 0;
+  fanAplica();
+}
+String fanJson() {
+  long r = fanMan >= 0 ? (long)((FAN_MAN_MS - (millis() - fanManT)) / 1000) : 0;
+  return ",\"man\":" + String(fanMan) + ",\"mr\":" + String(r < 0 ? 0 : r) + ",\"au\":" + String(fanAuto) +
+         ",\"pr\":" + String(fanProba ? (long)((10000 - min(10000UL, millis() - fanProbaT)) / 1000) + 1 : 0) + ",\"prpm\":" + String(fanProbaRpm) +
+         ",\"min\":" + String(S.ledFanMin) + ",\"onoff\":" + String(FANLED_ONOFF ? 1 : 0);
+}
+// /fan?p=0..100 = viteza de mana pentru o ora; /fan?auto=1 = inapoi pe automat; /fan?test=1 = 10 secunde la maxim
+Rasp apiFan(const Arg& a) {
+  if (a.has("p")) { fanMan = constrain((int)a.get("p").toInt(), 0, 100); fanManT = millis(); controlLed(); }
+  if (a.has("auto")) { fanMan = -1; controlLed(); }
+  if (a.has("test") && !fanProba) {
+    fanProba = true; fanProbaT = millis(); fanProbaRpm = -2;
+#if FANLED_TACH
+    fanRpmLive = false;
+#endif
+    fanAplica();
+  }
+  return Rasp{200, "application/json", "{\"f\":" + String(fanAplicat < 0 ? 0 : fanAplicat) + ",\"rpm\":" + String(fanRpm) + ",\"rl\":" + String(fanRpmLive ? 1 : 0) + fanJson() + "}"};
+}
+void hFan() { if (!auth()) return; trimite(apiFan(Arg{"", true})); }
+
+// ---------- pornit/oprit de mana pentru cateva minute (butoanele rapide din aplicatie) ----------
+uint32_t modExp[4] = {0, 0, 0, 0};          // cand revine pe automat (epoch); 0 = nu revine singur
+unsigned long modExpMs[4] = {0, 0, 0, 0};   // la fel, in millis (cand placa nu stie inca ora)
+void modExpVerifica() {
+  bool sch = false;
+  time_t n = time(nullptr);
+  for (int i = 0; i < 4; i++) {
+    bool gata = (modExp[i] && n > 1000000000 && (uint32_t)n >= modExp[i]) || (!modExp[i] && modExpMs[i] && (long)(millis() - modExpMs[i]) >= 0);
+    if (!gata) continue;
+    modExp[i] = 0; modExpMs[i] = 0;
+    if (S.mod[i] != 0) { S.mod[i] = 0; sch = true; }
+  }
+  if (sch) { salveaza(); logica(); prefs.putBytes("mexp", modExp, sizeof(modExp)); }
+}
+long modRamas(int i) {   // secunde pana revine pe automat
+  time_t n = time(nullptr);
+  if (modExp[i] && n > 1000000000) return max(0L, (long)modExp[i] - (long)n);
+  if (modExpMs[i]) return max(0L, (long)(modExpMs[i] - millis()) / 1000);
+  return 0;
 }
 
 void logica() {
@@ -786,6 +900,7 @@ void repornesteCurat(const char* motiv) {
   evSalveaza();
   optSalveazaZile();
   h30Salveaza();
+  oreSalveaza();
   delay(200);
   ESP.restart();
 }
@@ -837,6 +952,19 @@ void reteaLoop() {
 }
 
 // ---------- paza (watchdog): daca programul se blocheaza 30 de secunde, placa reporneste singura ----------
+// 1.8.9: inainte de fiecare pas din loop() notam unde suntem, intr-o memorie care nu se sterge la repornire.
+// Dupa o repornire facuta de paza, mesajul de pe Telegram spune unde s-a blocat si cata memorie era libera.
+RTC_NOINIT_ATTR uint32_t pasMagic, pasCod, pasHeap;
+const uint32_t PAS_MAGIC = 0x50A1D589;
+#define PAS(n) (pasCod = (n))
+const char* PAS_NUME[] = {"pornire", "pagina web", "actualizarea prin Arduino IDE", "mementouri și rezumatul nopții", "verificarea rețelei",
+                          "legătura prin internet (EMQX)", "căutarea actualizărilor pe GitHub", "optimizare", "salvarea jurnalului",
+                          "raportul Telegram", "ploaia (pompa Tuya)", "turația ventilatorului", "WiFi", "comenzile Telegram",
+                          "Bluetooth", "ecran", "mesajul de pornire Telegram", "citirea senzorilor", "comanda aparatelor", "alertele Telegram"};
+String pasText() {
+  if (pasMagic != PAS_MAGIC || pasCod >= sizeof(PAS_NUME) / sizeof(PAS_NUME[0])) return "";
+  return String(PAS_NUME[pasCod]) + ". Memorie liberă atunci: " + String(pasHeap) + " KB";
+}
 void pazaPorneste() {
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
   esp_task_wdt_config_t c = {};
@@ -860,7 +988,10 @@ String setariJson() {   // toate setarile, ca JSON (pagina, copia de rezerva)
   j += ",\"plO1\":" + String(S.plOra[0]) + ",\"plO2\":" + String(S.plOra[1]) + ",\"plO3\":" + String(S.plOra[2]);
   j += ",\"plDur\":" + String(S.plDur) + ",\"plMax\":" + String(S.plMax) + ",\"plVent\":" + String(S.plVent);
   j += ",\"circLa\":" + String(S.circLa) + ",\"circDur\":" + String(S.circDur) + ",\"standbyMin\":" + String(S.standbyMin) + ",\"ledFanOn\":" + String(S.ledFanOn) + ",\"ledFanMax\":" + String(S.ledFanMax) + ",\"ledCutoff\":" + String(S.ledCutoff);
-  j += ",\"umA\":" + String(S.umAuto) + ",\"umT\":" + String(S.umTinta) + ",\"umS\":" + String(S.umStrict) + "}";
+  j += ",\"umA\":" + String(S.umAuto) + ",\"umT\":" + String(S.umTinta) + ",\"umS\":" + String(S.umStrict);
+  j += ",\"ledFanMin\":" + String(S.ledFanMin) + ",\"hz\":" + String(S.hranZile) + ",\"ho\":" + String(S.hranOra);
+  for (int k = 0; k < 3; k++) j += ",\"ol" + String(k) + "\":" + String(S.oreLim[k]);
+  j += "}";
   return j;
 }
 
@@ -887,14 +1018,28 @@ Rasp apiStatus(const Arg& a) {
 #endif
   j += ",\"led\":{\"t\":" + (isnan(tLed) ? String("null") : String(tLed, 1)) + ",\"f\":" + String(fanLedPct) + ",\"oh\":" + String(ledOverheat ? 1 : 0) +
        ",\"rpm\":" + String(fanRpm) + ",\"rl\":" + String(fanRpmLive ? 1 : 0) + ",\"ff\":" + String(fanFail ? 1 : 0) +
-       ",\"tach\":" + String(FANLED_TACH ? (FANLED_4PIN || FANLED_ONOFF ? 2 : 1) : 0) + ledSrcJson() + "},\"pl\":" + plJson() + ",\"mem\":" + memJson() + ",\"sys\":" + sysJson() + ",\"vac\":" + String(vacanta ? 1 : 0) + ",\"hb\":" + String(umBlocatMotiv) + ",\"s\":" + setariJson() + "}";
+       ",\"tach\":" + String(FANLED_TACH ? (FANLED_4PIN || FANLED_ONOFF ? 2 : 1) : 0) + ledSrcJson() + fanJson() + "},\"pl\":" + plJson() + ",\"mem\":" + memJson() + ",\"ore\":" + oreJson() + ",\"hr\":" + hranScurt() + ",\"sys\":" + sysJson() + ",\"vac\":" + String(vacanta ? 1 : 0) + ",\"hb\":" + String(umBlocatMotiv) + ",\"mp\":[" +
+       String(modRamas(0)) + "," + String(modRamas(1)) + "," + String(modRamas(2)) + "," + String(modRamas(3)) + "]" +
+       (nivelCerere == 1 ? String(",\"vz\":1") : String(",\"pv\":[") + String(vPass.length() ? 1 : 0) + "," + String(vizUlt) + "," + String(vizCale) + "]") +
+       ",\"s\":" + setariJson() + "}";
   return Rasp{200, "application/json", j};
 }
 void hStatus() { if (!auth()) return; trimite(apiStatus(Arg{"", true})); }
 
 Rasp apiMod(const Arg& a) {
   int i = a.get("i").toInt(), v = a.get("v").toInt();
-  if (i >= 0 && i < 4 && v >= 0 && v <= 2) { S.mod[i] = v; salveaza(); logica(); }
+  if (i >= 0 && i < 4 && v >= 0 && v <= 2) {
+    S.mod[i] = v;
+    modExp[i] = 0; modExpMs[i] = 0;
+    int mn = a.has("min") ? constrain((int)a.get("min").toInt(), 0, 720) : 0;   // &min=5 = doar 5 minute, apoi automat
+    if (mn > 0 && v != 0) {
+      time_t n = time(nullptr);
+      if (n > 1000000000) modExp[i] = (uint32_t)n + mn * 60UL;
+      modExpMs[i] = millis() + mn * 60000UL;
+    }
+    prefs.putBytes("mexp", modExp, sizeof(modExp));
+    salveaza(); logica();
+  }
   return Rasp{200, "text/plain", "ok"};
 }
 void hMod() { if (!auth()) return; trimite(apiMod(Arg{"", true})); }
@@ -914,6 +1059,10 @@ Rasp apiSave(const Arg& a) {
   if (a.has("ledFanOn")) S.ledFanOn = constrain((int)a.get("ledFanOn").toInt(), 20, 70);
   if (a.has("ledFanMax")) S.ledFanMax = constrain((int)a.get("ledFanMax").toInt(), 30, 90);
   if (a.has("ledCutoff")) S.ledCutoff = constrain((int)a.get("ledCutoff").toInt(), 40, 110);
+  if (a.has("ledFanMin")) S.ledFanMin = constrain((int)a.get("ledFanMin").toInt(), 0, 60);
+  if (a.has("hz")) S.hranZile = constrain((int)a.get("hz").toInt(), 0, 127);
+  if (a.has("ho")) S.hranOra = constrain((int)a.get("ho").toInt(), 0, 23);
+  for (int k = 0; k < 3; k++) { String key = "ol" + String(k); if (a.has(key)) S.oreLim[k] = constrain((int)a.get(key).toInt(), 0, 5000); }
   const char* plK[3] = {"plO1", "plO2", "plO3"};
   for (int k = 0; k < 3; k++) if (a.has(plK[k])) S.plOra[k] = constrain((int)a.get(plK[k]).toInt(), 0, 1440);
   if (a.has("plDur")) S.plDur = constrain((int)a.get("plDur").toInt(), 5, 180);
@@ -939,7 +1088,7 @@ Rasp apiSave(const Arg& a) {
   if (memSchimbat) memSalveaza();
   if (S.ledFanMax < S.ledFanOn + 5) S.ledFanMax = S.ledFanOn + 5;
   if (S.ledCutoff < S.ledFanMax + 5) S.ledCutoff = S.ledFanMax + 5;
-  salveaza(); logica();
+  salveaza(); controlLed(); logica();
   return Rasp{200, "text/plain", "ok"};
 }
 void hSave() { if (!auth()) return; trimite(apiSave(Arg{"", true})); }
@@ -960,9 +1109,11 @@ Rasp apiEv(const Arg& a) {
 }
 void hEv() { if (!auth()) return; trimite(apiEv(Arg{"", true})); }
 
-Rasp apiMem(const Arg& a) {   // /mem?i=2  = "Gata" la mementoul 2
+Rasp apiMem(const Arg& a) {   // /mem?i=2 = "Gata" la mementoul 2; /mem?o=0 = am curatat (dupa ore); /mem = starea
+  if (a.has("o")) { oreGata(a.get("o").toInt()); return Rasp{200, "text/plain", "ok"}; }
+  if (!a.has("i")) return Rasp{200, "application/json", "{\"mem\":" + memJson() + ",\"ore\":" + oreJson() + "}"};
   if (memGata(a.get("i").toInt())) return Rasp{200, "text/plain", "ok"};
-  else return Rasp{503, "text/plain", "Placa nu știe încă ora. Încearcă peste un minut."};
+  else return Rasp{503, "text/plain; charset=utf-8", "Placa nu știe încă ora. Încearcă peste un minut."};
 }
 void hMem() { if (!auth()) return; trimite(apiMem(Arg{"", true})); }
 
@@ -1262,7 +1413,19 @@ void setup() {
   mqIncarca();
   ghIncarca();
   vacanta = prefs.getUChar("vac", 0);
+  oreIncarca();
+  hranIncarca();
+  noapteIncarca();
+  privitIncarca();
+  if (prefs.getBytes("mexp", modExp, sizeof(modExp)) != sizeof(modExp)) memset(modExp, 0, sizeof(modExp));
   repMotiv = motivRepornire(esp_reset_reason());
+  {
+    esp_reset_reason_t rr = esp_reset_reason();
+    String unde = pasText();
+    if (unde.length() && (rr == ESP_RST_TASK_WDT || rr == ESP_RST_INT_WDT || rr == ESP_RST_WDT)) repMotiv += ". Se bloca la: " + unde;
+    else if (unde.length() && rr == ESP_RST_PANIC) repMotiv += ". Eroarea a apărut la: " + unde;
+    pasMagic = PAS_MAGIC; pasCod = 0; pasHeap = 0;
+  }
   if (prefs.isKey("rmotiv")) { repMotiv = prefs.getString("rmotiv", repMotiv); prefs.remove("rmotiv"); }   // repornire facuta de paza retelei/memoriei
 
 #if FOLOSESTE_DHT22
@@ -1306,6 +1469,10 @@ void setup() {
   server.on("/update", HTTP_POST, hUpdateGata, hUpdateDate);
   server.on("/e", hEv);
   server.on("/pl", hPl);
+  server.on("/fan", hFan);
+  server.on("/hran", hHran);
+  server.on("/noapte", hNoapte);
+  server.on("/privit", hPrivit);
   server.on("/setup/info", hSetupInfo);
   server.on("/setup/scan", hSetupScan);
   server.on("/setup/save", hSetupSave);
@@ -1324,29 +1491,32 @@ void setup() {
 
 void loop() {
   esp_task_wdt_reset();   // paza: bucla merge
-  server.handleClient();
-  if (otaPornit) ArduinoOTA.handle();
-  memLoop();
-  reteaLoop();
-  mqLoop();
-  ghLoop();
-  optLoop();
+  pasMagic = PAS_MAGIC; pasHeap = ESP.getFreeHeap() / 1024;
+  PAS(1); server.handleClient();
+  PAS(2); if (otaPornit) ArduinoOTA.handle();
+  PAS(3); memLoop();
+  PAS(4); reteaLoop();
+  PAS(5); mqLoop();
+  PAS(6); ghLoop();
+  PAS(7); optLoop();
+  PAS(8);
   { static unsigned long tEv = 0; if (evSchimbat && millis() - tEv > 600000UL) { tEv = millis(); evSalveaza(); } }
 #if FOLOSESTE_TELEGRAM
-  raportLoop();
+  PAS(9); raportLoop();
 #endif
-  ploaieLoop();
-  tachLoop();
-  wifiLoop();
+  PAS(10); ploaieLoop();
+  PAS(11); tachLoop(); fanLoop();
+  PAS(12); wifiLoop();
 #if FOLOSESTE_TELEGRAM
-  tgExecutaComenzi();   // comenzile primite pe Telegram
+  PAS(13); tgExecutaComenzi();   // comenzile primite pe Telegram
 #endif
 #if FOLOSESTE_BLE
-  bleLoop();
+  PAS(14); bleLoop();
 #endif
 #if FOLOSESTE_DISPLAY
-  displayLoop();
+  PAS(15); displayLoop();
 #endif
+  PAS(16);
 
   static bool eraConectat = (WiFi.status() == WL_CONNECTED);
   bool conectat = (WiFi.status() == WL_CONNECTED);
@@ -1375,6 +1545,7 @@ void loop() {
 
   if (millis() - tSenzor > 2000) {
     tSenzor = millis();
+    PAS(17);
     float t = citesteTemp(), h = citesteUmid();
     static int esecuri = 0;
     if (isnan(t) || isnan(h)) {
@@ -1385,6 +1556,7 @@ void loop() {
       esecuri = 0; temp = t; hum = h;
     }
     umBlocatVerifica();
+    noapteAdauga();
     if ((histCount == 0 && !isnan(temp)) || (histCount > 0 && millis() - tHist >= 300000UL)) {
       tHist = millis();
       inregistreaza();
@@ -1398,11 +1570,13 @@ void loop() {
     static int esecL = 0;
     if (tl <= -100.0f || tl == 85.0f) { if (++esecL >= 5) tLed = NAN; }   // 85.0 = valoarea de pornire a senzorului
     else { esecL = 0; tLed = tl; }
+    PAS(18);
     controlLed();
     ploaieProgram();
     logica();
 #if FOLOSESTE_TELEGRAM
-    verificaAlerte();
+    PAS(19); verificaAlerte();
 #endif
+    PAS(0);
   }
 }

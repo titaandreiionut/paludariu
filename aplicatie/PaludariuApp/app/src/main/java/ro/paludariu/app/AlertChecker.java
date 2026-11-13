@@ -89,9 +89,21 @@ final class AlertChecker {
                 if (mem != null) {
                     for (int k = 0; k < mem.length(); k++) {
                         JSONObject m = mem.optJSONObject(k);
+                        if (k == 1 || k == 4) continue;   // 1.8.9: hranirea are calendarul ei, pompa merge dupa ore
                         if (m == null || m.isNull("r") || m.optInt("z", 0) <= 0) continue;
                         long r = m.optLong("r", 1);
                         if (r <= 0) alerts.put("mem" + k, AlertRules.reminder(m.optString("n", "întreținere"), r));
+                    }
+                }
+                // intretinerea dupa ore de mers (placa 1.8.9): [minute, limita in ore, secunde]
+                org.json.JSONArray ore = d.optJSONArray("ore");
+                String[] oreN = {"Curăță membrana de ceață", "Curăță pompa și sita", "Șterge praful de pe ventilatorul lămpii"};
+                if (ore != null) {
+                    for (int k = 0; k < ore.length() && k < oreN.length; k++) {
+                        org.json.JSONArray o = ore.optJSONArray(k);
+                        if (o == null || o.optInt(1, 0) <= 0) continue;
+                        if (o.optLong(0, 0) >= o.optLong(1, 0) * 60L)
+                            alerts.put("ore" + k, oreN[k] + ": a mers " + (o.optLong(0, 0) / 60) + " de ore (limita: " + o.optInt(1) + ").");
                     }
                 }
                 notifyNew(c, b, alerts);
@@ -101,6 +113,8 @@ final class AlertChecker {
             }
         }
         Widget.updateAll(c);
+        try { Rezumat.check(c); } catch (Exception ignored) { }      // 1.8.9: rezumatul de dimineata
+        try { Copii.auto(c); } catch (Exception ignored) { }         // 1.8.9: copia de duminica
         checkAppUpdate(c, 12 * 3600_000L);
         return ok;
     }
