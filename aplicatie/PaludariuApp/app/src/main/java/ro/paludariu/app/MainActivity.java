@@ -293,6 +293,18 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    private void inviteDone(org.json.JSONObject j) {
+        String name = Invitatie.apply(this, j);
+        renderSaved();
+        boolean adm = Invitatie.eAdmin(j);
+        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                .setTitle("Gata")
+                .setMessage("„" + name + "” e în lista ta. " + (adm ? "Ai acces complet, ca administrator." : "Poți vedea tot, dar nu poți porni sau opri nimic.")
+                        + (j.optString("k").isEmpty() ? " Merge doar pe WiFi-ul unde e placa." : " Merge și prin internet.")
+                        + " Dacă aplicația era deja deschisă la placa asta, închide-o de tot (din aplicațiile recente) și deschide-o din nou.")
+                .setPositiveButton("OK", null).show();
+    }
+
     /** Familia: lipeste codul primit de la proprietar si placa apare in lista, doar pentru privit. */
     private void showInviteDialog() {
         LinearLayout form = new LinearLayout(this);
@@ -325,14 +337,19 @@ public class MainActivity extends Activity {
                 err.setText("Nu găsesc un cod bun. Cere o invitație nouă și lipește tot mesajul.");
                 return;
             }
-            String name = Invitatie.apply(this, j);
-            renderSaved();
             d.dismiss();
-            new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-                    .setTitle("Gata")
-                    .setMessage("„" + name + "” e în lista ta. Poți vedea tot, dar nu poți porni sau opri nimic."
-                            + (j.optString("k").isEmpty() ? " Merge doar pe WiFi-ul unde e placa." : " Merge și de acasă de la tine, prin internet."))
-                    .setPositiveButton("OK", null).show();
+            // 1.9.0: o invitatie "doar privit" nu inlocuieste fara intrebare o placa la care esti deja administrator
+            if (!Invitatie.eAdmin(j) && Boards.eAdmin(this, Boards.normalize(j.optString("u")))) {
+                new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                        .setTitle("Ești deja administrator")
+                        .setMessage("La „" + j.optString("n", "placa asta") + "” intri deja cu parola de administrator. Codul ăsta e doar pentru privit: "
+                                + "dacă îl folosești, telefonul tău nu mai poate porni, opri sau schimba nimic, nici acasă, nici prin internet.")
+                        .setPositiveButton("Rămân administrator", null)
+                        .setNegativeButton("Folosește totuși codul", (x2, w) -> inviteDone(j))
+                        .show();
+                return;
+            }
+            inviteDone(j);
         }));
         d.show();
     }
@@ -551,10 +568,13 @@ public class MainActivity extends Activity {
     private void confirmDelete(Boards.Board b) {
         new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
                 .setTitle("Ștergi „" + b.name + "”?")
-                .setMessage("Placa dispare doar din listă. Dacă e în rețea, o găsești din nou automat.")
+                .setMessage("Placa dispare din listă, iar telefonul uită parola și accesul prin internet pentru ea. Dacă e în rețea, o găsești din nou automat și intri cu parola pe care o alegi atunci.")
                 .setPositiveButton("Șterge", (d, w) -> {
                     Boards.remove(this, b.url);
                     renderSaved();
+                    new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                            .setMessage("Gata. Ca să intri cu altă parolă, închide aplicația de tot (din aplicațiile recente) și deschide-o din nou.")
+                            .setPositiveButton("OK", null).show();
                 })
                 .setNegativeButton("Renunță", null)
                 .show();

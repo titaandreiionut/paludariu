@@ -148,7 +148,9 @@ final class AlertChecker {
         p.edit().putLong("app_upd_t", now).apply();
         HttpURLConnection con = null;
         try {
-            con = (HttpURLConnection) new URL("https://api.github.com/repos/" + repo + "/releases/latest").openConnection();
+            // 1.9.0: cautam cel mai nou release care are aplicatia (Paludariu.apk). Un release doar pentru placa
+            // (fara .apk) nu mai cere o aplicatie noua.
+            con = (HttpURLConnection) new URL("https://api.github.com/repos/" + repo + "/releases?per_page=10").openConnection();
             con.setConnectTimeout(8000);
             con.setReadTimeout(8000);
             con.setRequestProperty("Accept", "application/vnd.github+json");
@@ -158,10 +160,21 @@ final class AlertChecker {
             byte[] buf = new byte[4096];
             int n;
             while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-            JSONObject j = new JSONObject(out.toString("UTF-8"));
+            org.json.JSONArray rel = new org.json.JSONArray(out.toString("UTF-8"));
+            JSONObject j = null;
+            for (int r = 0; r < rel.length() && j == null; r++) {
+                JSONObject x = rel.optJSONObject(r);
+                if (x == null || x.optBoolean("draft") || x.optBoolean("prerelease")) continue;
+                org.json.JSONArray as = x.optJSONArray("assets");
+                for (int k = 0; as != null && k < as.length(); k++) {
+                    JSONObject a = as.optJSONObject(k);
+                    if (a != null && a.optString("name").toLowerCase(java.util.Locale.US).endsWith(".apk")) { j = x; break; }
+                }
+            }
+            if (j == null) { p.edit().remove("app_upd_tag").apply(); return; }
             String tag = j.optString("tag_name", "");
             String page = j.optString("html_url", "https://github.com/" + repo + "/releases");
-            boolean apk = out.toString("UTF-8").contains(".apk\"");
+            boolean apk = true;
             String mine = "";
             try { mine = c.getPackageManager().getPackageInfo(c.getPackageName(), 0).versionName; } catch (Exception ignored) { }
             if (!apk || compare(tag, mine) <= 0) { p.edit().remove("app_upd_tag").apply(); return; }

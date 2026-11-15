@@ -99,8 +99,23 @@ final class Boards {
         if (normalize(url).equalsIgnoreCase(prefs(c).getString("last", ""))) prefs(c).edit().remove("last").apply();
         List<Board> list = load(c);
         for (int i = list.size() - 1; i >= 0; i--) {
-            if (list.get(i).url.equalsIgnoreCase(url)) list.remove(i);
+            if (list.get(i).url.equalsIgnoreCase(url)) {
+                // 1.9.0: uitam si parola si accesul prin internet, ca la urmatoarea adaugare sa poti intra altfel
+                Remote.remove(c, list.get(i).name);
+                list.remove(i);
+            }
         }
         store(c, list);
+        String host = android.net.Uri.parse(normalize(url)).getHost();
+        if (host != null) prefs(c).edit().remove("user_" + host).remove("pass_" + host).apply();
+        try { android.webkit.WebViewDatabase.getInstance(c).clearHttpAuthUsernamePassword(); } catch (Exception ignored) { }
+    }
+
+    /** Parola salvata pentru placa asta e cea de administrator (nu "privit")? */
+    static boolean eAdmin(Context c, String url) {
+        String host = android.net.Uri.parse(normalize(url)).getHost();
+        if (host == null) return false;
+        String u = prefs(c).getString("user_" + host, null);
+        return u != null && !u.equals("privit") && prefs(c).getString("pass_" + host, null) != null;
     }
 }

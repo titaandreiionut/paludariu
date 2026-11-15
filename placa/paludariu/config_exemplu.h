@@ -28,7 +28,7 @@ const char* WEB_PASS = "schimba-ma";   // aceeasi parola o cere si Arduino IDE l
 // ---------- TELEGRAM ----------
 // Lasa ghilimelele goale ca sa opresti Telegram.
 #define FOLOSESTE_TELEGRAM true
-const char* TG_TOKEN = "";   // ex. "123456789:AAH...xyz"
+const char* TG_TOKEN = "";   // ex. "123456789:AAH...xyz" (sau le lasi goale si le pui din pagina: Setari > Placa > Conexiuni)
 const char* TG_CHAT = "";    // ex. "123456789"
 
 // ---------- PLOAIE (pompa Tuya / Smart Life) ----------

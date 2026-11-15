@@ -5,7 +5,7 @@
 // DATELE TALE (WiFi, parole, Telegram, Tuya, relee, senzori) stau in config.h, in acelasi folder.
 // Cand primesti o versiune noua, inlocuiesti toate fisierele din folder, mai putin config.h.
 #include "config.h"
-#define VERSIUNE "1.8.9"
+#define VERSIUNE "1.9.0"
 struct Arg; struct Rasp;   // cererile paginii (vezi mai jos)
 struct ZiOpt; struct OptMed; struct Sfat;   // optimizare.ino
 extern bool ceataDinTimp;
@@ -582,6 +582,36 @@ void fanLedWrite(int pct) {
 }
 
 // NTC pe radiator: media a 16 citiri, apoi formula cu constanta B. -127 = fir rupt sau scurtcircuit.
+// ---------- DS18B20 pe radiator (1.9.0): placa il cauta dupa adresa si nu citeste nimic daca nu e legat ----------
+DeviceAddress dsAdr;
+bool dsGasit = false;
+unsigned long dsCautT = 0;
+void dsCauta() {
+  dsCautT = millis();
+  dsGasit = false;
+#if !SENZOR_LED_NTC
+  dsLed.begin();
+  dsLed.setWaitForConversion(false);
+  if (dsLed.getDeviceCount() > 0 && dsLed.getAddress(dsAdr, 0) && dsLed.validFamily(dsAdr)) {
+    dsGasit = true;
+    dsLed.setResolution(dsAdr, 11);
+    dsLed.requestTemperaturesByAddress(dsAdr);
+  }
+#endif
+}
+float dsCiteste() {
+  static int rau = 0;
+  if (!dsGasit) {
+    if (millis() - dsCautT > 60000UL) dsCauta();   // il cautam din nou o data pe minut (poate l-ai legat acum)
+    return -127;
+  }
+  float t = dsLed.getTempC(dsAdr);
+  dsLed.requestTemperaturesByAddress(dsAdr);   // cererea pentru urmatoarea citire
+  if (t <= -100.0f) { if (++rau >= 30) { rau = 0; dsGasit = false; } }   // nu mai raspunde: l-ai scos
+  else rau = 0;
+  return t;
+}
+
 float citesteNtc() {
   uint32_t mv = 0;
   for (int i = 0; i < 16; i++) mv += analogReadMilliVolts(PIN_NTC);
@@ -827,7 +857,13 @@ String sysJson() {
   return "{\"v\":\"" VERSIUNE "\",\"up\":" + String(millis() / 1000) + ",\"rssi\":" +
          String(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0) + ",\"rr\":\"" + repMotiv + "\",\"ota\":" + String(otaPosibil() ? 1 : 0) +
          ",\"heap\":" + String(ESP.getFreeHeap() / 1024) + ",\"hmin\":" + String(heapMin == 0xFFFFFFFF ? 0 : heapMin / 1024) +
-         ",\"wc\":" + String(wifiCaderi) + ghJsonScurt() + optScurt() + "}";
+         ",\"wc\":" + String(wifiCaderi) + ghJsonScurt() + optScurt() +
+#if FOLOSESTE_TELEGRAM
+         ",\"tg\":" + String(tgSursaCfg()) +
+#else
+         ",\"tg\":-1" +
+#endif
+         "}";
 }
 
 // ---------- actualizare prin WiFi: fisierul .bin trimis din pagina (Setari > Actualizează placa) ----------
@@ -1018,7 +1054,8 @@ Rasp apiStatus(const Arg& a) {
 #endif
   j += ",\"led\":{\"t\":" + (isnan(tLed) ? String("null") : String(tLed, 1)) + ",\"f\":" + String(fanLedPct) + ",\"oh\":" + String(ledOverheat ? 1 : 0) +
        ",\"rpm\":" + String(fanRpm) + ",\"rl\":" + String(fanRpmLive ? 1 : 0) + ",\"ff\":" + String(fanFail ? 1 : 0) +
-       ",\"tach\":" + String(FANLED_TACH ? (FANLED_4PIN || FANLED_ONOFF ? 2 : 1) : 0) + ledSrcJson() + fanJson() + "},\"pl\":" + plJson() + ",\"mem\":" + memJson() + ",\"ore\":" + oreJson() + ",\"hr\":" + hranScurt() + ",\"sys\":" + sysJson() + ",\"vac\":" + String(vacanta ? 1 : 0) + ",\"hb\":" + String(umBlocatMotiv) + ",\"mp\":[" +
+       ",\"tach\":" + String(FANLED_TACH ? (FANLED_4PIN || FANLED_ONOFF ? 2 : 1) : 0) + ",\"ds\":" + String(SENZOR_LED_NTC ? 2 : dsGasit ? 1 : 0) +
+       ",\"mx\":" + String(S.ledFanMax) + ledSrcJson() + fanJson() + "},\"pl\":" + plJson() + ",\"mem\":" + memJson() + ",\"ore\":" + oreJson() + ",\"hr\":" + hranScurt() + ",\"sys\":" + sysJson() + ",\"vac\":" + String(vacanta ? 1 : 0) + ",\"hb\":" + String(umBlocatMotiv) + ",\"mp\":[" +
        String(modRamas(0)) + "," + String(modRamas(1)) + "," + String(modRamas(2)) + "," + String(modRamas(3)) + "]" +
        (nivelCerere == 1 ? String(",\"vz\":1") : String(",\"pv\":[") + String(vPass.length() ? 1 : 0) + "," + String(vizUlt) + "," + String(vizCale) + "]") +
        ",\"s\":" + setariJson() + "}";
@@ -1430,7 +1467,7 @@ void setup() {
 
 #if FOLOSESTE_DHT22
   dht.begin();
-  dsLed.begin(); dsLed.setWaitForConversion(false); dsLed.requestTemperatures();
+  dsCauta();
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
   ledcAttach(PIN_FANLED, FANLED_FREQ, 8);
 #else
@@ -1448,6 +1485,7 @@ void setup() {
   bleInit();
 #endif
 #if FOLOSESTE_TELEGRAM
+  tgIncarca();
   tgInit();
 #endif
   conectareWifi();
@@ -1481,6 +1519,7 @@ void setup() {
   server.on("/wifireset", hWifiReset);
 #if FOLOSESTE_TELEGRAM
   server.on("/tgtest", hTgTest);
+  server.on("/tgcfg", hTgCfg);
 #endif
   server.on("/manifest.json", hManifest);
   server.on("/icon-192.png", hIcon192);
@@ -1564,12 +1603,19 @@ void loop() {
 #if SENZOR_LED_NTC
     float tl = citesteNtc();
 #else
-    float tl = dsLed.getTempCByIndex(0);   // citire DS18B20 (cererea pentru urmatoarea se trimite acum)
-    dsLed.requestTemperatures();
+    float tl = dsCiteste();
 #endif
-    static int esecL = 0;
-    if (tl <= -100.0f || tl == 85.0f) { if (++esecL >= 5) tLed = NAN; }   // 85.0 = valoarea de pornire a senzorului
-    else { esecL = 0; tLed = tl; }
+    // 1.9.0: citirile imposibile nu conteaza (un pin fara senzor culege zgomot care poate arata ca o temperatura)
+    static int esecL = 0, salt = 0;
+    static float cand = NAN;
+    bool bun = tl > -30.0f && tl < 125.0f && tl != 85.0f;   // 85.0 = valoarea de pornire a senzorului
+    if (bun && !isnan(tLed) && fabsf(tl - tLed) > 15.0f) {   // salt mare: il credem doar daca se repeta de 3 ori
+      if (!isnan(cand) && fabsf(tl - cand) < 3.0f) salt++; else salt = 1;
+      cand = tl;
+      if (salt < 3) bun = false;
+    }
+    if (!bun) { if (++esecL >= 5) { tLed = NAN; ledOverheat = false; } }
+    else { esecL = 0; salt = 0; cand = NAN; tLed = tl; }
     PAS(18);
     controlLed();
     ploaieProgram();

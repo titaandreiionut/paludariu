@@ -345,6 +345,10 @@ public class BoardActivity extends Activity {
         // ---------- 1.8.9: invitatia "doar privit" ----------
         @JavascriptInterface
         public void invite(String viewPass) { if (viewPass != null && !viewPass.isEmpty()) makeInvite(viewPass); }
+
+        // 1.9.0: invitatie de administrator (acces complet, si prin internet)
+        @JavascriptInterface
+        public void inviteAdmin() { ui.post(BoardActivity.this::confirmAdminInvite); }
     }
 
     // ---------------- jurnal foto: camera sau galerie ----------------
@@ -405,6 +409,41 @@ public class BoardActivity extends Activity {
                 else android.widget.Toast.makeText(this, "Nu am putut citi poza.", android.widget.Toast.LENGTH_LONG).show();
             });
         }).start();
+    }
+
+    // ---------------- invitatia de administrator ----------------
+    private void confirmAdminInvite() {
+        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                .setTitle("Invitație de administrator")
+                .setMessage("Codul conține parola paginii și cheia de acces prin internet. Cine îl are poate porni, opri și schimba tot, de oriunde. "
+                        + "Trimite-l doar cuiva în care ai încredere. Dacă îl dai cuiva greșit, schimbi WEB_PASS în config.h și reconfigurezi accesul de la distanță.")
+                .setPositiveButton("Fac codul", (d, w) -> makeAdminInvite())
+                .setNegativeButton("Renunță", null)
+                .show();
+    }
+
+    private void makeAdminInvite() {
+        String h = Uri.parse(url).getHost();
+        String user = prefs.getString("user_" + h, null), pass = prefs.getString("pass_" + h, null);
+        if (user == null || pass == null || "privit".equals(user)) {
+            android.widget.Toast.makeText(this, "Telefonul tău nu are parola de administrator salvată pentru placa asta.", android.widget.Toast.LENGTH_LONG).show();
+            return;
+        }
+        String board = boardKey();
+        Remote.Cfg rc = Remote.load(this, board);
+        String code;
+        try {
+            code = Invitatie.encodeAdmin(getIntent().getStringExtra(EXTRA_NAME) == null ? board : getIntent().getStringExtra(EXTRA_NAME), url, user, pass, rc);
+        } catch (Exception e) {
+            return;
+        }
+        String text = "\uD83E\uDD80 Invitație de administrator la paludariul meu („" + board + "”): acces complet.\n"
+                + "1. Instalează aplicația Paludariu.\n2. Apasă „Adaugă o placă” → „Am un cod de invitație” și lipește tot mesajul ăsta.\n\n"
+                + code + (rc.ok() ? "" : "\n\n(Merge doar pe WiFi-ul unde e placa.)");
+        android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_SEND);
+        i.setType("text/plain");
+        i.putExtra(android.content.Intent.EXTRA_TEXT, text);
+        try { startActivity(android.content.Intent.createChooser(i, "Trimite invitația de administrator")); } catch (Exception ignored) { }
     }
 
     // ---------------- invitatia "doar privit" ----------------
@@ -634,7 +673,7 @@ public class BoardActivity extends Activity {
 
     private static final java.util.Set<String> REMOTE_PATHS = new java.util.HashSet<>(java.util.Arrays.asList(
             "/s", "/h", "/h30", "/e", "/m", "/save", "/pl", "/mem", "/cfg", "/vac", "/gh", "/tgtest", "/opt",
-            "/hran", "/fan", "/noapte", "/privit"));
+            "/hran", "/fan", "/noapte", "/privit"));   // /tgcfg nu: tokenul Telegram se schimba doar de acasa
 
     /** O cerere a paginii, trimisa placii prin internet. */
     private WebResourceResponse remoteResponse(Uri u) {

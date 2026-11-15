@@ -23,7 +23,22 @@ const char* TG_TASTATURA =
   "[\"/vacanta on\",\"/vacanta off\"]],"
   "\"resize_keyboard\":true,\"is_persistent\":true}";
 
-bool tgConfigurat() { return strlen(TG_TOKEN) > 20 && strlen(TG_CHAT) > 0; }
+// 1.9.0: tokenul si chatul se pot pune din pagina (Setari > Placa > Conexiuni) si raman pe placa.
+// Daca nu sunt puse acolo, se folosesc cele din config.h.
+char tgTok[64] = "", tgCht[24] = "";
+uint8_t tgSursa = 0;            // 0 = nimic, 1 = din config.h, 2 = salvate pe placa
+volatile bool tgReset = false;  // tokenul s-a schimbat: citirea comenzilor o ia de la capat
+void tgIncarca() {
+  String t = prefs.getString("tgt", ""), c = prefs.getString("tgc", "");
+  char nt[64] = "", nc[24] = "";
+  uint8_t s = 0;
+  if (t.length() > 20 && c.length()) { strncpy(nt, t.c_str(), 63); strncpy(nc, c.c_str(), 23); s = 2; }
+  else if (strlen(TG_TOKEN) > 20 && strlen(TG_CHAT) > 0) { strncpy(nt, TG_TOKEN, 63); strncpy(nc, TG_CHAT, 23); s = 1; }
+  memcpy(tgTok, nt, sizeof tgTok); memcpy(tgCht, nc, sizeof tgCht);
+  tgSursa = s; tgReset = true;
+}
+int tgSursaCfg() { return tgSursa; }
+bool tgConfigurat() { return strlen(tgTok) > 20 && strlen(tgCht) > 0; }
 
 String jsonEsc(const char* s) {
   String o;
@@ -37,7 +52,7 @@ String jsonEsc(const char* s) {
   return o;
 }
 
-String tgUrl(const char* metoda) { return String("https://api.telegram.org/bot") + TG_TOKEN + "/" + metoda; }
+String tgUrl(const char* metoda) { return String("https://api.telegram.org/bot") + tgTok + "/" + metoda; }
 
 bool tgPost(const char* metoda, const String& body) {
   if (!tgConfigurat() || WiFi.status() != WL_CONNECTED) return false;
@@ -56,7 +71,7 @@ bool tgPost(const char* metoda, const String& body) {
 }
 
 bool tgTrimiteAcum(const char* text, const char* butoane = nullptr) {
-  String body = String("{\"chat_id\":\"") + jsonEsc(TG_CHAT) + "\",\"text\":\"" + jsonEsc(text) + "\"";
+  String body = String("{\"chat_id\":\"") + jsonEsc(tgCht) + "\",\"text\":\"" + jsonEsc(text) + "\"";
   if (butoane) body += String(",\"reply_markup\":") + butoane;
   body += "}";
   return tgPost("sendMessage", body);
@@ -165,6 +180,7 @@ void tgComanda(String text) {
 /** Asteapta pana la 20 s comenzi noi (long polling). La primul apel doar sare peste comenzile vechi. */
 void tgCitesteComenzi() {
   static bool pregatit = false;
+  if (tgReset) { tgReset = false; pregatit = false; tgOffset = 0; }
   if (!tgConfigurat() || WiFi.status() != WL_CONNECTED) { vTaskDelay(pdMS_TO_TICKS(3000)); return; }
   char off[24];
   if (pregatit) snprintf(off, sizeof off, "%lld", tgOffset); else strcpy(off, "-1");
@@ -201,7 +217,7 @@ void tgCitesteComenzi() {
     int c = bucata.indexOf("\"chat\":{\"id\":");
     int t = bucata.indexOf("\"text\":\"");
     if (c < 0 || t < 0) continue;
-    if (jsonNumar(bucata, c + 13) != String(TG_CHAT)) continue;   // doar tu poti comanda placa
+    if (jsonNumar(bucata, c + 13) != String(tgCht)) continue;   // doar tu poti comanda placa
     tgComanda(jsonText(bucata, t + 8));
   }
   if (!pregatit) {
@@ -481,7 +497,7 @@ void raportLoop() {
 Rasp apiTgTest(const Arg& a) {
   (void)a;
   if (!tgConfigurat()) {
-    return Rasp{503, "text/plain; charset=utf-8", "Telegram nu e configurat. Completează TG_TOKEN și TG_CHAT în cod."};
+    return Rasp{503, "text/plain; charset=utf-8", "Telegram nu e configurat. Pune tokenul botului și numărul tău de chat mai jos, la Telegram."};
   }
   if (WiFi.status() != WL_CONNECTED) {
     return Rasp{503, "text/plain; charset=utf-8", "Placa nu e conectată la internet."};
@@ -490,4 +506,30 @@ Rasp apiTgTest(const Arg& a) {
   return Rasp{200, "text/plain; charset=utf-8", "Mesaj trimis. Verifică Telegram în câteva secunde."};
 }
 void hTgTest() { if (!auth()) return; trimite(apiTgTest(Arg{"", true})); }
+
+// /tgcfg (doar de acasa, doar proprietarul): tok + chat = le salveaza pe placa; del=1 = inapoi la config.h; fara nimic = starea
+String tgAscuns(const char* s) {   // arata doar inceputul si sfarsitul
+  int n = strlen(s);
+  if (n <= 8) return n ? String("•••") : String("");
+  return String(s).substring(0, 4) + "…" + String(s).substring(n - 3);
+}
+void hTgCfg() {
+  if (!auth()) return;
+  if (server.hasArg("del")) { prefs.remove("tgt"); prefs.remove("tgc"); tgIncarca(); }
+  if (server.hasArg("tok") || server.hasArg("chat")) {
+    String t = server.arg("tok"), c = server.arg("chat");
+    t.trim(); c.trim();
+    if (!t.length() && tgSursa == 2) t = prefs.getString("tgt", "");   // a schimbat doar chatul
+    bool okT = t.length() > 30 && t.length() < 63 && t.indexOf(':') > 3;
+    for (unsigned i = 0; okT && i < t.length(); i++) { char x = t[i]; okT = isalnum((unsigned char)x) || x == ':' || x == '_' || x == '-'; }
+    bool okC = c.length() > 0 && c.length() < 23;
+    for (unsigned i = 0; okC && i < c.length(); i++) okC = isdigit((unsigned char)c[i]) || (i == 0 && c[i] == '-');
+    if (!okT) { server.send(400, "text/plain; charset=utf-8", "Tokenul nu arată bine. Îl iei de la @BotFather: are cifre, „:” și apoi litere (ex. 123456789:AAH…)."); return; }
+    if (!okC) { server.send(400, "text/plain; charset=utf-8", "Numărul de chat are doar cifre (îl afli de la @userinfobot, la „Id”)."); return; }
+    prefs.putString("tgt", t); prefs.putString("tgc", c);
+    tgIncarca();
+    tg("\xE2\x9C\x85 Telegram e configurat din pagina plăcii. Alertele vor veni aici.");   // ✅
+  }
+  server.send(200, "application/json", "{\"s\":" + String(tgSursa) + ",\"tok\":\"" + jEsc(tgAscuns(tgTok)) + "\",\"chat\":\"" + jEsc(tgAscuns(tgCht)) + "\"}");
+}
 #endif
