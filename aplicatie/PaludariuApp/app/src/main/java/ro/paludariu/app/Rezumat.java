@@ -74,6 +74,8 @@ final class Rezumat {
             int cf = j.optInt("cf");
             s.append(" · confort ").append(cf).append(cf >= 85 ? " (excelent)" : cf >= 70 ? " (bun)" : cf >= 50 ? " (acceptabil)" : " (slab)");
         }
+        if (!j.isNull("aMin") && !j.isNull("aMax") && j.has("aMin"))   // placa 1.9.1+: apa
+            s.append(" · apa ").append(nr(j.optDouble("aMin"), 1)).append("–").append(nr(j.optDouble("aMax"), 1)).append(" °C");
         int n = j.optInt("ceata", 0);
         s.append(" · ceața ").append(n == 0 ? "n-a pornit" : n == 1 ? "a pornit o dată" : "a pornit de " + n + " ori");
         long tmo = j.optLong("tMinO", 0);

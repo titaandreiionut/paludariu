@@ -9,7 +9,7 @@
 Noapte NC, NU;                // NC = noaptea care se aduna acum, NU = ultima noapte incheiata
 bool noapteActiv = false;
 
-void noapteGol(Noapte& x) { memset(&x, 0, sizeof(x)); x.tMin = x.hMin = INT16_MAX; x.tMax = x.hMax = INT16_MIN; }
+void noapteGol(Noapte& x) { memset(&x, 0, sizeof(x)); x.tMin = x.hMin = x.aMin = INT16_MAX; x.tMax = x.hMax = x.aMax = INT16_MIN; }
 bool eNoapte(const struct tm& t) { return t.tm_hour >= 22 || t.tm_hour < 8; }
 
 void noapteIncarca() {
@@ -39,6 +39,7 @@ void noapteAdauga() {
   if (h < NC.hMin) NC.hMin = h;
   if (h > NC.hMax) NC.hMax = h;
   NC.cfSum += noapteConfort(temp, hum); NC.cfN++;
+  if (!isnan(tApa)) { int16_t a = (int16_t)lroundf(tApa * 10); if (a < NC.aMin) NC.aMin = a; if (a > NC.aMax) NC.aMax = a; }
 }
 void noapteCeata() { if (noapteActiv && NC.ceata < 65535) NC.ceata++; }
 void noapteAlerta(int i) { if (noapteActiv && i < 16) NC.alerte |= 1 << i; }
@@ -63,14 +64,16 @@ void noapteLoop(const struct tm& t) {
 
 const char* AL_TEXT[] = {"senzorul de climă nu a răspuns", "a fost prea frig", "a fost prea cald", "a fost prea uscat",
                          "a fost prea umed", "radiatorul LED s-a supraîncălzit", "senzorul radiatorului nu a răspuns",
-                         "ventilatorul lămpii nu s-a învârtit", "senzorul de umiditate părea blocat"};
+                         "ventilatorul lămpii nu s-a învârtit", "senzorul de umiditate părea blocat",
+                         "apa a fost prea rece", "apa a fost prea caldă"};
 String noapteJson(const Noapte& x, bool inCurs) {
   if (!x.start) return "{\"ok\":0}";
   auto v = [](int16_t a) { return (a == INT16_MAX || a == INT16_MIN) ? String("null") : String(a / 10.0, 1); };
   String j = "{\"ok\":1,\"inc\":" + String(inCurs ? 1 : 0) + ",\"de\":" + String(x.start) + ",\"la\":" + String(x.gata) +
              ",\"tMin\":" + v(x.tMin) + ",\"tMinO\":" + String(x.tMinT) + ",\"tMax\":" + v(x.tMax) +
              ",\"hMin\":" + v(x.hMin) + ",\"hMax\":" + v(x.hMax) + ",\"cf\":" + (x.cfN ? String(x.cfSum / x.cfN) : String("null")) +
-             ",\"ceata\":" + String(x.ceata) + ",\"rep\":" + String(x.rep) + ",\"pb\":[";
+             ",\"ceata\":" + String(x.ceata) + ",\"rep\":" + String(x.rep) +
+             ",\"aMin\":" + v(x.aMin) + ",\"aMax\":" + v(x.aMax) + ",\"pb\":[";
   bool prim = true;
   for (int i = 0; i < (int)(sizeof(AL_TEXT) / sizeof(AL_TEXT[0])); i++) {
     if (!(x.alerte & (1 << i))) continue;

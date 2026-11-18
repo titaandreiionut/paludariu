@@ -509,6 +509,7 @@ void drawJurnal() {
     static const char* PRG[4] = {"Ceata ON", "Ceata OFF", "Vent. ON", "Vent. OFF"};
     char md = e.man == 2 ? 'T' : e.man ? 'M' : 'A';   // T = ceata pornita din timp (optimizare)
     if (e.out >= 20 && e.out <= 23) snprintf(row, sizeof row, "%-5s Prag %-9s %d->%d%%", tb, PRG[e.out - 20], e.h / 10, e.man);   // reglaj / sfat
+    else if (e.out == 24) snprintf(row, sizeof row, "%-5s Lampa: %s", tb, e.on ? "pauza caldura" : "pauza gata");
     else if (e.out >= 10) snprintf(row, sizeof row, "%-5s Intretinere: gata", tb);
     else if (e.h > 0) snprintf(row, sizeof row, "%-5s %-10s %-3s %c %d%%", tb, nm, e.on ? "ON" : "OFF", md, e.h / 10);
     else snprintf(row, sizeof row, "%-5s %-10s %-3s %c", tb, nm, e.on ? "ON" : "OFF", md);

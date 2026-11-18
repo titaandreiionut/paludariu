@@ -265,7 +265,7 @@ void tg(const String& s) {
 
 // ---------- alertele de pe placa ----------
 // O problema trebuie sa dureze 2 minute inainte de alerta (fara alarme false); la fel si revenirea.
-enum { AL_SENZOR, AL_FRIG, AL_CALD, AL_USCAT, AL_UMED, AL_LEDCALD, AL_LEDSENZ, AL_LEDFAN, AL_UMBLOC, AL_N };
+enum { AL_SENZOR, AL_FRIG, AL_CALD, AL_USCAT, AL_UMED, AL_LEDCALD, AL_LEDSENZ, AL_LEDFAN, AL_UMBLOC, AL_APAREC, AL_APACALD, AL_N };
 const unsigned long AL_ASTEPTARE = 120000UL;
 bool alActiv[AL_N] = {false};
 unsigned long alDin[AL_N] = {0};
@@ -277,7 +277,7 @@ void verificaAlerte() {
   bool cond[AL_N];
   cond[AL_SENZOR] = !senzorOk;
   // in vacanta alertele sunt mai stricte: anunta mai devreme ca ceva o ia razna
-  float tMin = vacanta ? 21.0f : 20.0f, tMax = vacanta ? 31.0f : 32.0f;
+  float tMin = vacanta ? 21.0f : 20.0f, tMax = S.alCald / 10.0f;   // 1.9.1: pragul "prea cald" se alege din Setari
   float mUscat = vacanta ? 3.0f : 5.0f, mUmed = vacanta ? 2.0f : 3.0f;
   cond[AL_FRIG] = senzorOk && temp < tMin;
   cond[AL_CALD] = senzorOk && temp > tMax;
@@ -287,6 +287,8 @@ void verificaAlerte() {
   cond[AL_LEDSENZ] = isnan(tLed) && !ledOverheat;
   cond[AL_LEDFAN] = fanFail;
   cond[AL_UMBLOC] = umBlocat;
+  cond[AL_APAREC] = S.apaOn && !isnan(tApa) && tApa < S.apaMin / 10.0f;
+  cond[AL_APACALD] = S.apaOn && !isnan(tApa) && tApa > S.apaMax / 10.0f;
 
   unsigned long now = millis();
   for (int i = 0; i < AL_N; i++) {
@@ -333,6 +335,14 @@ void verificaAlerte() {
         tg(cond[i] ? w + "Ventilatorul de răcire al LED-ului nu se învârte (" + String(fanRpm < 0 ? 0 : fanRpm) +
                          " rpm), așa că lumina s-a oprit. Verifică ventilatorul și firul de turație."
                    : ok + "Ventilatorul de răcire se învârte din nou (" + String(fanRpm) + " rpm), lumina merge după program.");
+        break;
+      case AL_APAREC:
+        tg(cond[i] ? w + "Apa e prea rece: " + nr(tApa, 1) + " °C (pragul tău: " + nr(S.apaMin / 10.0f, 1) + " °C). Peștii tropicali încetinesc sub 22 °C."
+                   : ok + "Apa s-a încălzit la loc: " + nr(tApa, 1) + " °C.");
+        break;
+      case AL_APACALD:
+        tg(cond[i] ? w + "Apa e prea caldă: " + nr(tApa, 1) + " °C (pragul tău: " + nr(S.apaMax / 10.0f, 1) + " °C). Verifică lampa și dacă se evaporă mult."
+                   : ok + "Apa s-a răcit: " + nr(tApa, 1) + " °C.");
         break;
       case AL_UMBLOC:
         tg(cond[i] ? w + "Senzorul de umiditate pare blocat: " + String(umBlocatMotiv == 1 ? "arată peste 98% de aproape o oră" : "arată aceeași valoare de 3 ore") +

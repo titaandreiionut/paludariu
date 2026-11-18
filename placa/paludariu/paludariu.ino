@@ -5,7 +5,7 @@
 // DATELE TALE (WiFi, parole, Telegram, Tuya, relee, senzori) stau in config.h, in acelasi folder.
 // Cand primesti o versiune noua, inlocuiesti toate fisierele din folder, mai putin config.h.
 #include "config.h"
-#define VERSIUNE "1.9.0"
+#define VERSIUNE "1.9.1"
 struct Arg; struct Rasp;   // cererile paginii (vezi mai jos)
 struct ZiOpt; struct OptMed; struct Sfat;   // optimizare.ino
 extern bool ceataDinTimp;
@@ -93,6 +93,18 @@ const int  PIN[4]       = {16,   17,   13,   25};   // ceata = GPIO13, ventilato
 // Senzor nivel apa (optional, se porneste din config.h): flotor intre GPIO32 si GND, contact inchis = apa OK.
 const int PIN_NIVEL = 32;
 
+// Senzorul din apa (1.9.1, optional, se porneste din Setari): NTC intre GPIO36 (VP) si GND, rezistenta intre 3V3 si GPIO36
+const int PIN_APA = 36;
+#ifndef APA_RFIX
+#define APA_RFIX 4700.0f    // rezistenta fixa din divizor
+#endif
+#ifndef APA_R25
+#define APA_R25 10000.0f    // NTC-ul la 25 de grade ("10K")
+#endif
+#ifndef APA_B
+#define APA_B 3950.0f       // constanta B
+#endif
+
 const char* NUME[4] = {"Pompa", "Lumina", "Ceata", "Ventilator"};
 
 // ---------- RACIRE LED (radiator) ----------
@@ -151,9 +163,17 @@ struct Setari {
   uint8_t hranOra;           // ora mementoului de hranire (0-23)
   uint8_t rez1;
   uint16_t oreLim[3];        // intretinere dupa ore: membrana ceata, pompa + sita, ventilator lampa (0 = oprit)
+  // 1.9.1
+  int16_t alCald;            // alerta "prea cald" peste (x10 °C)
+  int16_t calLim;            // pauza lampii peste (x10 °C)
+  uint8_t calPauza;          // cat tine pauza lampii (minute; 0 = oprit)
+  uint8_t apaOn;             // senzorul NTC din apa (GPIO36) pornit
+  int16_t apaCor;            // reglajul senzorului din apa (x10 °C)
+  int16_t apaMin, apaMax;    // alerta apa prea rece / prea calda (x10 °C)
+  uint16_t lpDe, lpDur;      // pauza de pranz a luminii: de la (minute din zi), cat tine (minute; 0 = fara)
 };
 Setari S;
-const uint8_t VER = 7;
+const uint8_t VER = 8;
 
 Preferences prefs;
 WebServer server(80);
@@ -239,6 +259,7 @@ float citesteUmid() { return sht.readHumidity(); }
 
 float temp = NAN, hum = NAN;
 float tLed = NAN;            // temperatura radiatorului LED
+float tApa = NAN;            // 1.9.1: temperatura apei (NTC pe GPIO36)
 int fanLedPct = 0;           // viteza ventilatorului de racire (0-100)
 bool ledOverheat = false;    // supraincalzire: lumina fortata oprita
 int fanRpm = -1;             // ultima turatie masurata a ventilatorului de racire (-1 = nemasurata)
@@ -256,7 +277,10 @@ void h30Adauga(uint32_t e, float t, float h);
 uint32_t histEpoch = 0;       // ora reala (epoch) a ultimului punct
 bool histAliniat = true;      // dupa pornire: golul cat placa a fost oprita se completeaza cu "lipsa"
 int histDeSalvat = 0;
+int16_t histA[H_N];             // 1.9.1: temperatura apei x10, aliniata cu histT/histH
+int16_t histAPune = INT16_MIN;  // valoarea care intra la urmatorul punct
 void histPune(int16_t t, int16_t h) {
+  histA[histHead] = histAPune; histAPune = INT16_MIN;
   histT[histHead] = t; histH[histHead] = h;
   histHead = (histHead + 1) % H_N;
   if (histCount < H_N) histCount++;
@@ -271,6 +295,10 @@ void histSalveaza() {
     buf[4 + i] = histT[k]; buf[4 + H_N + i] = histH[k];
   }
   prefs.putBytes("hist", buf.p, (2 * H_N + 4) * sizeof(int16_t));
+  // apa, separat (aceeasi ordine)
+  for (int i = 0; i < histCount; i++) buf[1 + i] = histA[(histHead - histCount + i + H_N) % H_N];
+  buf[0] = histCount;
+  prefs.putBytes("ha", buf.p, (H_N + 1) * sizeof(int16_t));
   histDeSalvat = 0;
 }
 void histIncarca() {
@@ -282,6 +310,8 @@ void histIncarca() {
   histEpoch = (uint16_t)buf[0] | ((uint32_t)(uint16_t)buf[1] << 16);
   histCount = 0; histHead = 0;
   for (int i = 0; i < n; i++) histPune(buf[4 + i], buf[4 + H_N + i]);
+  if (prefs.getBytes("ha", buf.p, (H_N + 1) * sizeof(int16_t)) == (H_N + 1) * sizeof(int16_t) && buf[0] == n)
+    for (int i = 0; i < n; i++) histA[i] = buf[1 + i];
   histAliniat = false;   // completam golul cand aflam ora (dupa NTP)
 }
 void inregistreaza() {
@@ -293,6 +323,7 @@ void inregistreaza() {
     else for (long g = 1; g < gol; g++) histPune(INT16_MIN, INT16_MIN);
     histAliniat = true;
   }
+  histAPune = isnan(tApa) ? INT16_MIN : (int16_t)lroundf(tApa * 10);
   histPune(isnan(temp) ? INT16_MIN : (int16_t)lroundf(temp * 10), isnan(hum) ? INT16_MIN : (int16_t)lroundf(hum * 10));
   if (oraOk) histEpoch = e;
   if (++histDeSalvat >= 12) histSalveaza();   // o data pe ora
@@ -394,6 +425,7 @@ struct Noapte {
   uint16_t alerte;            // biti AL_... (telegram.ino)
   uint8_t rep;                // reporniri in timpul noptii
   uint8_t rez[3];
+  int16_t aMin, aMax;         // 1.9.1: apa (x10)
 };
 
 void noapteGol(Noapte& x);
@@ -521,6 +553,9 @@ void valoriImplicite() {
   S.umAuto = 1; S.umStrict = 3; S.umTinta = 86;
   S.ledFanMin = 30; S.hranZile = 1 | 4 | 16; S.hranOra = 19; S.rez1 = 0;   // luni, miercuri, vineri, seara
   S.oreLim[0] = 300; S.oreLim[1] = 500; S.oreLim[2] = 2000;
+  S.alCald = 290; S.calLim = 275; S.calPauza = 20;
+  S.apaOn = 0; S.apaCor = 0; S.apaMin = 220; S.apaMax = 280;
+  S.lpDe = 780; S.lpDur = 0;   // 13:00, oprita
   umCalc();
 }
 
@@ -546,8 +581,8 @@ void incarca() {
     if (prefs.getBytes("s", &tmp, n) == n && tmp.ver == VER) S = tmp;
   } else if (n > 0 && n < sizeof(tmp)) {
     // setari salvate de versiunea de dinainte: le pastram, iar campurile noi raman la valorile implicite
-    if (prefs.getBytes("s", &tmp, n) == n && (tmp.ver == VER - 1 || tmp.ver == VER - 2)) {
-      bool din187 = tmp.ver == VER - 2;
+    if (prefs.getBytes("s", &tmp, n) == n && tmp.ver >= 5 && tmp.ver < VER) {   // campurile noi raman la valorile implicite
+      bool din187 = tmp.ver == 5;
       tmp.ver = VER; S = tmp;
       // de la 1.8.7: tinta porneste din pragurile pe care le aveai, ca umiditatea sa ramana cam la fel
       if (din187) { S.umAuto = 1; S.umStrict = 3; S.umTinta = (int)lroundf((S.mistOn + S.mistOff) / 2); umCalc(); }
@@ -586,15 +621,24 @@ void fanLedWrite(int pct) {
 DeviceAddress dsAdr;
 bool dsGasit = false;
 unsigned long dsCautT = 0;
+// 1.9.1: cautarea e scurta si limitata. Inainte foloseam dsLed.begin(), care pe un fir cu contact slab sau fara
+// rezistenta putea cauta zeci de secunde, iar paza (watchdog) repornea placa.
 void dsCauta() {
   dsCautT = millis();
   dsGasit = false;
 #if !SENZOR_LED_NTC
-  dsLed.begin();
-  dsLed.setWaitForConversion(false);
-  if (dsLed.getDeviceCount() > 0 && dsLed.getAddress(dsAdr, 0) && dsLed.validFamily(dsAdr)) {
-    dsGasit = true;
-    dsLed.setResolution(dsAdr, 11);
+  if (!owLed.reset()) return;            // nimic pe fir: gata, fara cautare
+  uint8_t a[8];
+  owLed.reset_search();
+  for (int k = 0; k < 4 && !dsGasit; k++) {
+    esp_task_wdt_reset();
+    if (!owLed.search(a)) break;
+    bool fam = a[0] == 0x28 || a[0] == 0x10 || a[0] == 0x22 || a[0] == 0x3B || a[0] == 0x42;
+    if (fam && OneWire::crc8(a, 7) == a[7]) { memcpy(dsAdr, a, 8); dsGasit = true; }
+  }
+  if (dsGasit) {
+    dsLed.setWaitForConversion(false);
+    dsLed.setResolution(dsAdr, 11, true);   // true = fara alta cautare pe fir
     dsLed.requestTemperaturesByAddress(dsAdr);
   }
 #endif
@@ -602,7 +646,7 @@ void dsCauta() {
 float dsCiteste() {
   static int rau = 0;
   if (!dsGasit) {
-    if (millis() - dsCautT > 60000UL) dsCauta();   // il cautam din nou o data pe minut (poate l-ai legat acum)
+    if (millis() - dsCautT > 300000UL) dsCauta();   // il cautam din nou la 5 minute (poate l-ai legat acum)
     return -127;
   }
   float t = dsLed.getTempC(dsAdr);
@@ -767,6 +811,57 @@ long modRamas(int i) {   // secunde pana revine pe automat
   return 0;
 }
 
+#if FOLOSESTE_TELEGRAM
+void tg(const String& s);
+#endif
+// ---------- 1.9.1: pauza de caldura a lampii ----------
+// Daca aerul trece de "Pauza lampa peste", lampa (pe automat) se stinge cateva minute si se aprinde cand se raceste.
+bool calActiv = false;
+unsigned long calPanaLa = 0;
+uint8_t calAzi = 0;
+int calZi = -1;
+void caldVerifica() {
+  struct tm t;
+  bool oraOk = oraLocala(&t);
+  if (oraOk && t.tm_yday != calZi) { calZi = t.tm_yday; calAzi = 0; }
+  float lim = S.calLim / 10.0f;
+  if (calActiv) {
+    bool gata = S.calPauza == 0 || S.mod[1] != 0 || isnan(temp) ||
+                ((long)(millis() - calPanaLa) >= 0 && temp < lim - 0.5f);
+    if (gata) { calActiv = false; logEvM(24, false, false); }
+    return;
+  }
+  if (S.calPauza == 0 || isnan(temp) || S.mod[1] != 0 || !stare[1] || temp < lim) return;
+  calActiv = true;
+  calPanaLa = millis() + S.calPauza * 60000UL;
+  logEvM(24, true, false);
+  if (++calAzi == 3) {
+#if FOLOSESTE_TELEGRAM
+    tg("\xF0\x9F\x8C\xA1 Lampa a luat azi deja 3 pauze de căldură (aerul a trecut de " + String(lim, 1) +
+       " °C). Ridică lampa de pe capac, pune-i pastă termică sau scade-i puterea, ca paludariul să nu se mai încingă.");   // 🌡
+#endif
+  }
+}
+long calRamas() { if (!calActiv) return 0; long r = (long)(calPanaLa - millis()) / 1000; return r > 0 ? r : 1; }
+bool lpAcum() {
+  struct tm t;
+  if (S.lpDur == 0 || !oraLocala(&t)) return false;
+  int h = t.tm_hour * 60 + t.tm_min;
+  return ((h - S.lpDe + 1440) % 1440) < S.lpDur;
+}
+
+// ---------- 1.9.1: temperatura apei (NTC 10K pe GPIO36, rezistenta de 4,7 kohm la 3V3) ----------
+float apaCiteste() {
+  if (!S.apaOn) return NAN;
+  uint32_t mv = 0;
+  for (int i = 0; i < 16; i++) mv += analogReadMilliVolts(PIN_APA);
+  float v = mv / 16.0f;
+  if (v < 60 || v > 3150) return NAN;   // fir rupt sau scurtcircuit
+  float r = APA_RFIX * v / (3300.0f - v);
+  float t = 1.0f / (1.0f / 298.15f + logf(r / APA_R25) / APA_B) - 273.15f + S.apaCor / 10.0f;
+  return (t > -5 && t < 60) ? t : NAN;
+}
+
 void logica() {
   bool senzorOk = !isnan(temp) && !isnan(hum);
   struct tm t;
@@ -806,6 +901,7 @@ void logica() {
     int h = t.tm_hour * 60 + t.tm_min;
     aut[1] = (S.lumOra <= S.lumStop) ? (h >= S.lumOra && h < S.lumStop)
                                      : (h >= S.lumOra || h < S.lumStop);
+    if (S.lpDur > 0 && ((h - S.lpDe + 1440) % 1440) < S.lpDur) aut[1] = false;   // 1.9.1: pauza de pranz
   } else aut[1] = false;
   // Ventilator
   bool dupa = dupaActiv && (millis() - dupaT0 < (unsigned long)S.plVent * 60000UL);
@@ -818,6 +914,7 @@ void logica() {
     bool on = (S.mod[i] == 1) ? true : (S.mod[i] == 2) ? false : aut[i];
     if (i == 2 && !apaOk) on = false;  // siguranta: ceata niciodata fara apa
     if (i == 1 && (ledOverheat || fanFail)) on = false;  // siguranta: radiator supraincalzit sau ventilator oprit
+    if (i == 1 && calActiv && S.mod[1] == 0) on = false; // 1.9.1: pauza de caldura (doar pe automat)
     scrieIesire(i, on);
   }
 }
@@ -996,7 +1093,8 @@ const uint32_t PAS_MAGIC = 0x50A1D589;
 const char* PAS_NUME[] = {"pornire", "pagina web", "actualizarea prin Arduino IDE", "mementouri și rezumatul nopții", "verificarea rețelei",
                           "legătura prin internet (EMQX)", "căutarea actualizărilor pe GitHub", "optimizare", "salvarea jurnalului",
                           "raportul Telegram", "ploaia (pompa Tuya)", "turația ventilatorului", "WiFi", "comenzile Telegram",
-                          "Bluetooth", "ecran", "mesajul de pornire Telegram", "citirea senzorilor", "comanda aparatelor", "alertele Telegram"};
+                          "Bluetooth", "ecran", "mesajul de pornire Telegram", "citirea senzorilor", "comanda aparatelor", "alertele Telegram",
+                          "senzorul de climă (DHT22)", "senzorul radiatorului (DS18B20)", "salvarea istoricului", "senzorul apei"};
 String pasText() {
   if (pasMagic != PAS_MAGIC || pasCod >= sizeof(PAS_NUME) / sizeof(PAS_NUME[0])) return "";
   return String(PAS_NUME[pasCod]) + ". Memorie liberă atunci: " + String(pasHeap) + " KB";
@@ -1027,6 +1125,9 @@ String setariJson() {   // toate setarile, ca JSON (pagina, copia de rezerva)
   j += ",\"umA\":" + String(S.umAuto) + ",\"umT\":" + String(S.umTinta) + ",\"umS\":" + String(S.umStrict);
   j += ",\"ledFanMin\":" + String(S.ledFanMin) + ",\"hz\":" + String(S.hranZile) + ",\"ho\":" + String(S.hranOra);
   for (int k = 0; k < 3; k++) j += ",\"ol" + String(k) + "\":" + String(S.oreLim[k]);
+  j += ",\"alCald\":" + String(S.alCald) + ",\"calLim\":" + String(S.calLim) + ",\"calPauza\":" + String(S.calPauza) +
+       ",\"apaOn\":" + String(S.apaOn) + ",\"apaCor\":" + String(S.apaCor) + ",\"apaMin\":" + String(S.apaMin) + ",\"apaMax\":" + String(S.apaMax) +
+       ",\"lpDe\":" + String(S.lpDe) + ",\"lpDur\":" + String(S.lpDur);
   j += "}";
   return j;
 }
@@ -1055,7 +1156,9 @@ Rasp apiStatus(const Arg& a) {
   j += ",\"led\":{\"t\":" + (isnan(tLed) ? String("null") : String(tLed, 1)) + ",\"f\":" + String(fanLedPct) + ",\"oh\":" + String(ledOverheat ? 1 : 0) +
        ",\"rpm\":" + String(fanRpm) + ",\"rl\":" + String(fanRpmLive ? 1 : 0) + ",\"ff\":" + String(fanFail ? 1 : 0) +
        ",\"tach\":" + String(FANLED_TACH ? (FANLED_4PIN || FANLED_ONOFF ? 2 : 1) : 0) + ",\"ds\":" + String(SENZOR_LED_NTC ? 2 : dsGasit ? 1 : 0) +
-       ",\"mx\":" + String(S.ledFanMax) + ledSrcJson() + fanJson() + "},\"pl\":" + plJson() + ",\"mem\":" + memJson() + ",\"ore\":" + oreJson() + ",\"hr\":" + hranScurt() + ",\"sys\":" + sysJson() + ",\"vac\":" + String(vacanta ? 1 : 0) + ",\"hb\":" + String(umBlocatMotiv) + ",\"mp\":[" +
+       ",\"mx\":" + String(S.ledFanMax) + ledSrcJson() + fanJson() + "},\"pl\":" + plJson() + ",\"mem\":" + memJson() + ",\"ore\":" + oreJson() + ",\"hr\":" + hranScurt() + ",\"sys\":" + sysJson() + ",\"vac\":" + String(vacanta ? 1 : 0) + ",\"hb\":" + String(umBlocatMotiv) +
+       ",\"ta\":" + (isnan(tApa) ? String("null") : String(tApa, 1)) + ",\"taOn\":" + String(S.apaOn) +
+       ",\"cp\":" + String(calRamas()) + ",\"lp\":" + String(lpAcum() ? 1 : 0) + ",\"mp\":[" +
        String(modRamas(0)) + "," + String(modRamas(1)) + "," + String(modRamas(2)) + "," + String(modRamas(3)) + "]" +
        (nivelCerere == 1 ? String(",\"vz\":1") : String(",\"pv\":[") + String(vPass.length() ? 1 : 0) + "," + String(vizUlt) + "," + String(vizCale) + "]") +
        ",\"s\":" + setariJson() + "}";
@@ -1098,6 +1201,15 @@ Rasp apiSave(const Arg& a) {
   if (a.has("ledCutoff")) S.ledCutoff = constrain((int)a.get("ledCutoff").toInt(), 40, 110);
   if (a.has("ledFanMin")) S.ledFanMin = constrain((int)a.get("ledFanMin").toInt(), 0, 60);
   if (a.has("hz")) S.hranZile = constrain((int)a.get("hz").toInt(), 0, 127);
+  if (a.has("alCald")) S.alCald = constrain((int)a.get("alCald").toInt(), 240, 360);
+  if (a.has("calLim")) S.calLim = constrain((int)a.get("calLim").toInt(), 230, 340);
+  if (a.has("calPauza")) S.calPauza = constrain((int)a.get("calPauza").toInt(), 0, 90);
+  if (a.has("apaOn")) S.apaOn = a.get("apaOn").toInt() ? 1 : 0;
+  if (a.has("apaCor")) S.apaCor = constrain((int)a.get("apaCor").toInt(), -80, 80);
+  if (a.has("apaMin")) S.apaMin = constrain((int)a.get("apaMin").toInt(), 100, 300);
+  if (a.has("apaMax")) S.apaMax = constrain((int)a.get("apaMax").toInt(), 200, 350);
+  if (a.has("lpDe")) S.lpDe = constrain((int)a.get("lpDe").toInt(), 0, 1439);
+  if (a.has("lpDur")) S.lpDur = constrain((int)a.get("lpDur").toInt(), 0, 300);
   if (a.has("ho")) S.hranOra = constrain((int)a.get("ho").toInt(), 0, 23);
   for (int k = 0; k < 3; k++) { String key = "ol" + String(k); if (a.has(key)) S.oreLim[k] = constrain((int)a.get(key).toInt(), 0, 5000); }
   const char* plK[3] = {"plO1", "plO2", "plO3"};
@@ -1174,15 +1286,16 @@ Rasp apiHist(const Arg& a) {
   uint32_t e = acum();
   long ago = (histEpoch > 1000000000UL && e > histEpoch) ? (long)(e - histEpoch) : (long)((millis() - tHist) / 1000);
   String j = "{\"cap\":" + String(H_N) + ",\"ago\":" + String(ago) + ",\"t\":[";
-  j.reserve(4200);
-  for (int pas = 0; pas < 2; pas++) {
-    int16_t* a = pas == 0 ? histT : histH;
+  int pasi = S.apaOn ? 3 : 2;
+  j.reserve(pasi == 3 ? 6200 : 4200);
+  for (int pas = 0; pas < pasi; pas++) {
+    int16_t* a = pas == 0 ? histT : pas == 1 ? histH : histA;
     for (int i = 0; i < histCount; i++) {
       int16_t v = a[(histHead - histCount + i + H_N) % H_N];
       j += (v == INT16_MIN) ? String("null") : String(v / 10.0, 1);
       if (i < histCount - 1) j += ",";
     }
-    j += pas == 0 ? "],\"h\":[" : "]}";
+    j += pas == 0 ? "],\"h\":[" : (pas == 1 && pasi == 3) ? "],\"a\":[" : "]}";
   }
   return Rasp{200, "application/json", j};
 }
@@ -1584,7 +1697,7 @@ void loop() {
 
   if (millis() - tSenzor > 2000) {
     tSenzor = millis();
-    PAS(17);
+    PAS(20);
     float t = citesteTemp(), h = citesteUmid();
     static int esecuri = 0;
     if (isnan(t) || isnan(h)) {
@@ -1594,12 +1707,24 @@ void loop() {
     } else {
       esecuri = 0; temp = t; hum = h;
     }
+    PAS(23);
+    {   // 1.9.1: apa (medie usoara, ca sa nu sara cifrele)
+      static int esecA = 0;
+      float ta = apaCiteste();
+      if (isnan(ta)) { if (++esecA >= 5) tApa = NAN; }
+      else { esecA = 0; tApa = isnan(tApa) ? ta : tApa * 0.8f + ta * 0.2f; }
+    }
+    PAS(17);
     umBlocatVerifica();
     noapteAdauga();
+    esp_task_wdt_reset();
     if ((histCount == 0 && !isnan(temp)) || (histCount > 0 && millis() - tHist >= 300000UL)) {
+      PAS(22);
       tHist = millis();
       inregistreaza();
+      esp_task_wdt_reset();
     }
+    PAS(21);
 #if SENZOR_LED_NTC
     float tl = citesteNtc();
 #else
@@ -1619,6 +1744,7 @@ void loop() {
     PAS(18);
     controlLed();
     ploaieProgram();
+    caldVerifica();
     logica();
 #if FOLOSESTE_TELEGRAM
     PAS(19); verificaAlerte();
