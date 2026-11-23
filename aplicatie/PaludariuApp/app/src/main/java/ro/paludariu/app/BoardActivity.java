@@ -78,6 +78,7 @@ public class BoardActivity extends Activity {
         ws.setDomStorageEnabled(true);          // tema aleasa si lista de placi din pagina
         ws.setUseWideViewPort(true);
         ws.setLoadWithOverviewMode(true);
+        ws.setTextZoom(100);                    // 1.9.2: textul la fel de mare ca in browser, oricum e setat fontul telefonului
         web.addJavascriptInterface(new Bridge(), "PaludariuApp");
         web.setWebViewClient(new Client());
         web.setWebChromeClient(new Chrome());   // pentru alegerea fisierului la actualizarea placii
@@ -286,10 +287,26 @@ public class BoardActivity extends Activity {
             ui.post(() -> { if (!offline) goOffline(); });
         }
 
-        /** Sunetul unui buton din pagina: on, off, auto, click, save, rain, swipe. */
+        /** Sunetul unui buton din pagina: on, off, auto, click, save, rain, swipe. 1.9.2: si o vibratie scurta. */
         @JavascriptInterface
         public void sound(String name) {
-            if (name != null) Sounds.get(BoardActivity.this).ui(name);
+            if (name == null) return;
+            Sounds.get(BoardActivity.this).ui(name);
+            final int fb = name.equals("on") || name.equals("off") || name.equals("auto") || name.equals("rain")
+                    ? (android.os.Build.VERSION.SDK_INT >= 30 ? android.view.HapticFeedbackConstants.CONFIRM : android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                    : name.equals("swipe") ? android.view.HapticFeedbackConstants.CLOCK_TICK
+                    : name.equals("click") || name.equals("save") ? android.view.HapticFeedbackConstants.KEYBOARD_TAP : -1;
+            if (fb >= 0) ui.post(() -> web.performHapticFeedback(fb));
+        }
+
+        /** 1.9.2: culoarea temei din pagina, pentru barele telefonului (ex. "#0b1610"). */
+        @JavascriptInterface
+        public void bar(String color) {
+            if (color == null) return;
+            try {
+                final int c = android.graphics.Color.parseColor(color.trim());
+                ui.post(() -> { if (!isFinishing()) Ui.themeBars(BoardActivity.this, c); });
+            } catch (Exception ignored) { }
         }
 
         /** Butonul din pagina: Setari > Acces de la distanta. */
@@ -662,7 +679,7 @@ public class BoardActivity extends Activity {
         String ver = appVersion().replace("'", "");
         String inject = "<style>#rmb{position:sticky;top:8px;z-index:60;width:max-content;max-width:100%;margin:10px auto 0;padding:8px 14px;"
                 + "border-radius:99px;background:color-mix(in srgb,var(--cy) 18%,var(--c));border:1px solid color-mix(in srgb,var(--cy) 45%,transparent);"
-                + "color:var(--t);font:500 13px Figtree,system-ui,sans-serif}</style><script>(function(){window.__remote=true;"
+                + "color:var(--t);font:500 13px system-ui,sans-serif}</style><script>(function(){window.__remote=true;"
                 + "var b=document.createElement('div');b.id='rmb';b.textContent='\\uD83C\\uDF10 Prin internet: ești departe de casă';"
                 + "var h=document.querySelector('header.top');if(h)h.parentNode.insertBefore(b,h.nextSibling);"
                 + "var f=document.querySelector('.ft');if(f&&'" + ver + "')f.innerHTML=f.innerHTML.replace(/v[0-9.]+/,'v" + ver + "');"
@@ -777,9 +794,9 @@ public class BoardActivity extends Activity {
         String cand = t == 0 ? "" : " la " + formatTime(t);
         String inject = "<style>"
                 + "#offb{position:sticky;top:8px;z-index:60;margin:10px 0 0;padding:10px 12px 10px 16px;border-radius:18px;"
-                + "background:var(--bad);color:#fff;font:600 14px/1.35 Figtree,system-ui,sans-serif;display:flex;align-items:center;gap:10px;"
+                + "background:var(--bad);color:#fff;font:600 14px/1.35 system-ui,sans-serif;display:flex;align-items:center;gap:10px;"
                 + "box-shadow:0 6px 20px rgba(0,0,0,.35)}#offb span{flex:1}"
-                + "#offb button{flex:none;border:0;border-radius:99px;padding:9px 14px;background:#fff;color:#14261b;font:600 13px Figtree,system-ui,sans-serif}"
+                + "#offb button{flex:none;border:0;border-radius:99px;padding:9px 14px;background:#fff;color:#14261b;font:600 13px system-ui,sans-serif}"
                 // cat timp se conecteaza: o pastila discreta, nu banda rosie
                 + "#offb.con{background:var(--c);color:var(--m);border:1px solid var(--b);box-shadow:none;font-weight:500;font-size:13px;"
                 + "padding:8px 14px;width:max-content;max-width:100%;margin:10px auto 0;border-radius:99px}"
@@ -793,9 +810,9 @@ public class BoardActivity extends Activity {
                 + "body.offl .gauges,body.offl .ledc,body.offl .ac .as,body.offl #vz .lbl{opacity:.6;filter:saturate(.4)}"
                 + "body.offl #p0>.card:first-child,body.offl .ledc{position:relative}"
                 + "body.offl #p0>.card:first-child::after,body.offl .ledc::after{content:'offline';position:absolute;top:10px;right:12px;"
-                + "padding:2px 8px;border-radius:99px;background:var(--trk);color:var(--bad);font:600 11px Figtree,system-ui,sans-serif;letter-spacing:.5px}"
+                + "padding:2px 8px;border-radius:99px;background:var(--trk);color:var(--bad);font:600 11px system-ui,sans-serif;letter-spacing:.5px}"
                 + "body.offl .vih span::after,body.offl .vl small::after,body.offl .ac .as::after{content:' \\00b7  offline';color:var(--bad)}"
-                + "body.offl .tg,body.offl .vbt button,body.offl #plB,body.offl .save{opacity:.45}"
+                + "body.offl:not(.offc) .tg,body.offl:not(.offc) .vbt button,body.offl:not(.offc) #plB,body.offl:not(.offc) .save{opacity:.45}"
                 + "</style><script>(function(){"
                 + "var OFF='Placa e offline. Vezi ultimele date primite" + cand + ".',CON='Se conectează…';"
                 + "var b=document.createElement('div');b.id='offb';"
@@ -807,7 +824,7 @@ public class BoardActivity extends Activity {
                 + "b.querySelector('button').onclick=function(){window.PaludariuApp&&PaludariuApp.retry()};"
                 + "function no(){if(b.className=='con')return;var s=b.querySelector('span');s.textContent='Placa e offline, comenzile nu pot fi trimise acum.';"
                 + "setTimeout(function(){s.textContent=OFF},3500)}"
-                + "['mod','salv','plCmd','tgTest','memGata','upload','optCmd','oreGata','hrFed','hrAdd','hrDel','hrZi','hrOra','fanAuto','fanTest','pvToggle','pvNew','pvInvite','bkPune','bkAcum'].forEach(function(f){window[f]=function(){no();return Promise.resolve()}});"
+                + "['mod','salv','plCmd','tgTest','memGata','upload','optCmd','oreGata','hrFed','hrAdd','hrDel','hrZi','hrOra','fanAuto','fanTest','pvToggle','pvNew','pvInvite','bkPune','bkAcum','smOff'].forEach(function(f){window[f]=function(){no();return Promise.resolve()}});"
                 + "})();</script>";
         int end = html.lastIndexOf("</body>");
         html = end >= 0 ? html.substring(0, end) + inject + html.substring(end) : html + inject;

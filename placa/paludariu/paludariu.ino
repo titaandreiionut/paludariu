@@ -5,7 +5,13 @@
 // DATELE TALE (WiFi, parole, Telegram, Tuya, relee, senzori) stau in config.h, in acelasi folder.
 // Cand primesti o versiune noua, inlocuiesti toate fisierele din folder, mai putin config.h.
 #include "config.h"
-#define VERSIUNE "1.9.1"
+#define VERSIUNE "1.9.2"
+// 1.9.2: modul sigur (vezi pasText)
+RTC_NOINIT_ATTR uint32_t smMagic, smSir, smPasR;
+const uint32_t SM_MAGIC = 0x5AFE0192;
+bool modSigur = false;
+uint8_t smPas = 0;
+unsigned long smRepornLa = 0;
 struct Arg; struct Rasp;   // cererile paginii (vezi mai jos)
 struct ZiOpt; struct OptMed; struct Sfat;   // optimizare.ino
 extern bool ceataDinTimp;
@@ -249,8 +255,40 @@ void trimite(const Rasp& r) { server.send(r.cod, r.tip, r.corp); }
 #if FOLOSESTE_DHT22
 const int PIN_DHT = 4;
 DHT dht(PIN_DHT, DHT22);
-float citesteTemp() { return dht.readTemperature(); }
-float citesteUmid() { return dht.readHumidity(); }
+// 1.9.2: DHT22 il citim singuri. Biblioteca tinea intreruperile oprite pana termina; daca senzorul se oprea
+// la jumatatea raspunsului (umezeala, fir slabit), astepta secunde intregi si paza (watchdog) repornea placa.
+// Aici fiecare semnal are voie sa intarzie cel mult ~0,1 ms: daca nu vine, renuntam (toata citirea < 10 ms).
+float dhtT = NAN, dhtH = NAN;
+portMUX_TYPE dhtMux = portMUX_INITIALIZER_UNLOCKED;
+bool dhtNivel(int nivel, uint32_t maxUs, uint32_t* dur) {
+  uint32_t t0 = micros();
+  while (digitalRead(PIN_DHT) == nivel) { if (micros() - t0 > maxUs) return false; }
+  if (dur) *dur = micros() - t0;
+  return true;
+}
+bool dhtCiteste() {
+  uint8_t d[5] = {0, 0, 0, 0, 0};
+  uint32_t u = 0;
+  pinMode(PIN_DHT, OUTPUT);
+  digitalWrite(PIN_DHT, LOW);
+  delayMicroseconds(1100);          // semnalul de start (DHT22: minim 1 ms)
+  pinMode(PIN_DHT, INPUT_PULLUP);
+  portENTER_CRITICAL(&dhtMux);
+  bool ok = dhtNivel(HIGH, 200, NULL) && dhtNivel(LOW, 120, NULL) && dhtNivel(HIGH, 120, NULL);
+  for (int i = 0; i < 40 && ok; i++) {
+    ok = dhtNivel(LOW, 100, NULL) && dhtNivel(HIGH, 120, &u);
+    d[i / 8] = (d[i / 8] << 1) | (u > 40 ? 1 : 0);   // "1" tine ~70 us, "0" ~27 us
+  }
+  portEXIT_CRITICAL(&dhtMux);
+  if (!ok || (uint8_t)(d[0] + d[1] + d[2] + d[3]) != d[4]) return false;
+  float h = ((d[0] << 8) | d[1]) * 0.1f, t = (((d[2] & 0x7F) << 8) | d[3]) * 0.1f;
+  if (d[2] & 0x80) t = -t;
+  if (h < 0 || h > 100 || t < -40 || t > 80) return false;
+  dhtT = t; dhtH = h;
+  return true;
+}
+float citesteTemp() { if (!dhtCiteste()) { dhtT = NAN; dhtH = NAN; } return dhtT; }
+float citesteUmid() { return dhtH; }
 #else
 Adafruit_SHT31 sht;
 float citesteTemp() { return sht.readTemperature(); }
@@ -789,6 +827,16 @@ Rasp apiFan(const Arg& a) {
   return Rasp{200, "application/json", "{\"f\":" + String(fanAplicat < 0 ? 0 : fanAplicat) + ",\"rpm\":" + String(fanRpm) + ",\"rl\":" + String(fanRpmLive ? 1 : 0) + fanJson() + "}"};
 }
 void hFan() { if (!auth()) return; trimite(apiFan(Arg{"", true})); }
+// 1.9.2: iesirea din modul sigur
+Rasp apiSafe(const Arg& a) {
+  if (a.has("off")) {
+    smSir = 0; smPasR = 0xFF;
+    smRepornLa = millis() + 1500;   // raspunsul pleaca intai, apoi repornim
+    return Rasp{200, "text/plain; charset=utf-8", "Placa repornește normal."};
+  }
+  return Rasp{200, "application/json", String("{\"sm\":") + (modSigur ? 1 : 0) + "}"};
+}
+void hSafe() { if (!auth()) return; trimite(apiSafe(Arg{"", true})); }
 
 // ---------- pornit/oprit de mana pentru cateva minute (butoanele rapide din aplicatie) ----------
 uint32_t modExp[4] = {0, 0, 0, 0};          // cand revine pe automat (epoch); 0 = nu revine singur
@@ -954,7 +1002,7 @@ String sysJson() {
   return "{\"v\":\"" VERSIUNE "\",\"up\":" + String(millis() / 1000) + ",\"rssi\":" +
          String(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0) + ",\"rr\":\"" + repMotiv + "\",\"ota\":" + String(otaPosibil() ? 1 : 0) +
          ",\"heap\":" + String(ESP.getFreeHeap() / 1024) + ",\"hmin\":" + String(heapMin == 0xFFFFFFFF ? 0 : heapMin / 1024) +
-         ",\"wc\":" + String(wifiCaderi) + ghJsonScurt() + optScurt() +
+         ",\"wc\":" + String(wifiCaderi) + ghJsonScurt() + optScurt() + ",\"disp\":" + String(FOLOSESTE_DISPLAY ? 1 : 0) + smJson() +
 #if FOLOSESTE_TELEGRAM
          ",\"tg\":" + String(tgSursaCfg()) +
 #else
@@ -1095,9 +1143,34 @@ const char* PAS_NUME[] = {"pornire", "pagina web", "actualizarea prin Arduino ID
                           "raportul Telegram", "ploaia (pompa Tuya)", "turația ventilatorului", "WiFi", "comenzile Telegram",
                           "Bluetooth", "ecran", "mesajul de pornire Telegram", "citirea senzorilor", "comanda aparatelor", "alertele Telegram",
                           "senzorul de climă (DHT22)", "senzorul radiatorului (DS18B20)", "salvarea istoricului", "senzorul apei"};
+// 1.9.2: modul sigur. Daca paza reporneste placa de 3 ori la rand la acelasi pas (fiecare pornire a mers sub 10 minute),
+// placa porneste fara pasul acela: ce depinde de el sta oprit, restul merge dupa program. Iesi din el din pagina
+// (Acasa > Reporneste normal) sau cu o pana de curent.
+bool smSaribil(uint32_t n) {
+  static const uint8_t L[] = {2, 3, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 19, 20, 21, 22, 23};
+  for (uint8_t x : L) if (x == n) return true;
+  return false;
+}
+bool smSari(int n) { return modSigur && smPas == n; }
+String smJson() {
+  if (!modSigur) return "";
+  return String(",\"sm\":\"") + PAS_NUME[smPas] + "\",\"smn\":" + String(smSir);
+}
 String pasText() {
   if (pasMagic != PAS_MAGIC || pasCod >= sizeof(PAS_NUME) / sizeof(PAS_NUME[0])) return "";
   return String(PAS_NUME[pasCod]) + ". Memorie liberă atunci: " + String(pasHeap) + " KB";
+}
+void pazaTimpurie() {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  esp_task_wdt_config_t c = {};
+  c.timeout_ms = 90000;
+  c.idle_core_mask = 0;
+  c.trigger_panic = true;
+  if (esp_task_wdt_reconfigure(&c) != ESP_OK) esp_task_wdt_init(&c);
+#else
+  esp_task_wdt_init(90, true);
+#endif
+  esp_task_wdt_add(NULL);
 }
 void pazaPorneste() {
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
@@ -1396,7 +1469,7 @@ void conectareWifi() {
   WiFi.begin(ss.c_str(), pw.c_str());
   staConfigurat = true;
   Serial.print("WiFi");
-  for (int i = 0; i < 40 && WiFi.status() != WL_CONNECTED; i++) { delay(500); Serial.print("."); }
+  for (int i = 0; i < 40 && WiFi.status() != WL_CONNECTED; i++) { delay(500); Serial.print("."); esp_task_wdt_reset(); }
   Serial.println();
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print("Adresa IP: "); Serial.println(WiFi.localIP());
@@ -1540,6 +1613,7 @@ void setup() {
     pinMode(PIN[i], OUTPUT);
     digitalWrite(PIN[i], ACTIV_LOW[i] ? HIGH : LOW);
   }
+  pazaTimpurie();   // 1.9.2
 #if FOLOSESTE_NIVEL
   pinMode(PIN_NIVEL, INPUT_PULLUP);
 #endif
@@ -1573,13 +1647,19 @@ void setup() {
     esp_reset_reason_t rr = esp_reset_reason();
     String unde = pasText();
     if (unde.length() && (rr == ESP_RST_TASK_WDT || rr == ESP_RST_INT_WDT || rr == ESP_RST_WDT)) repMotiv += ". Se bloca la: " + unde;
+    // 1.9.2: modul sigur
+    bool wdt = rr == ESP_RST_TASK_WDT || rr == ESP_RST_INT_WDT || rr == ESP_RST_WDT;
+    if (smMagic != SM_MAGIC) { smMagic = SM_MAGIC; smSir = 0; smPasR = 0xFF; }
+    if (wdt && pasMagic == PAS_MAGIC) { if (smPasR == pasCod) smSir++; else { smSir = 1; smPasR = pasCod; } }
+    else if (!(rr == ESP_RST_SW && smSir >= 3)) { smSir = 0; smPasR = 0xFF; }   // o repornire din program nu scoate din modul sigur
+    if (smSir >= 3 && smSaribil(smPasR)) { modSigur = true; smPas = smPasR; }
     else if (unde.length() && rr == ESP_RST_PANIC) repMotiv += ". Eroarea a apărut la: " + unde;
     pasMagic = PAS_MAGIC; pasCod = 0; pasHeap = 0;
   }
   if (prefs.isKey("rmotiv")) { repMotiv = prefs.getString("rmotiv", repMotiv); prefs.remove("rmotiv"); }   // repornire facuta de paza retelei/memoriei
 
 #if FOLOSESTE_DHT22
-  dht.begin();
+  pinMode(PIN_DHT, INPUT_PULLUP);   // 1.9.2: citirea o facem noi (dhtCiteste)
   dsCauta();
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
   ledcAttach(PIN_FANLED, FANLED_FREQ, 8);
@@ -1621,6 +1701,7 @@ void setup() {
   server.on("/e", hEv);
   server.on("/pl", hPl);
   server.on("/fan", hFan);
+  server.on("/safe", hSafe);
   server.on("/hran", hHran);
   server.on("/noapte", hNoapte);
   server.on("/privit", hPrivit);
@@ -1643,30 +1724,32 @@ void setup() {
 
 void loop() {
   esp_task_wdt_reset();   // paza: bucla merge
+  if (!modSigur && smSir && millis() > 600000UL) { smSir = 0; smPasR = 0xFF; }
+  if (smRepornLa && millis() > smRepornLa) ESP.restart();
   pasMagic = PAS_MAGIC; pasHeap = ESP.getFreeHeap() / 1024;
   PAS(1); server.handleClient();
-  PAS(2); if (otaPornit) ArduinoOTA.handle();
-  PAS(3); memLoop();
+  PAS(2); if (otaPornit && !smSari(2)) ArduinoOTA.handle();
+  PAS(3); if (!smSari(3)) memLoop();
   PAS(4); reteaLoop();
-  PAS(5); mqLoop();
-  PAS(6); ghLoop();
-  PAS(7); optLoop();
+  PAS(5); if (!smSari(5)) mqLoop();
+  PAS(6); if (!smSari(6)) ghLoop();
+  PAS(7); if (!smSari(7)) optLoop();
   PAS(8);
-  { static unsigned long tEv = 0; if (evSchimbat && millis() - tEv > 600000UL) { tEv = millis(); evSalveaza(); } }
+  { static unsigned long tEv = 0; if (!smSari(8) && evSchimbat && millis() - tEv > 600000UL) { tEv = millis(); evSalveaza(); } }
 #if FOLOSESTE_TELEGRAM
-  PAS(9); raportLoop();
+  PAS(9); if (!smSari(9)) raportLoop();
 #endif
-  PAS(10); ploaieLoop();
-  PAS(11); tachLoop(); fanLoop();
+  PAS(10); if (!smSari(10)) ploaieLoop();
+  PAS(11); if (!smSari(11)) { tachLoop(); fanLoop(); }
   PAS(12); wifiLoop();
 #if FOLOSESTE_TELEGRAM
-  PAS(13); tgExecutaComenzi();   // comenzile primite pe Telegram
+  PAS(13); if (!smSari(13)) tgExecutaComenzi();   // comenzile primite pe Telegram
 #endif
 #if FOLOSESTE_BLE
-  PAS(14); bleLoop();
+  PAS(14); if (!smSari(14)) bleLoop();
 #endif
 #if FOLOSESTE_DISPLAY
-  PAS(15); displayLoop();
+  PAS(15); if (!smSari(15)) displayLoop();
 #endif
   PAS(16);
 
@@ -1686,6 +1769,10 @@ void loop() {
     } else {
       tg("\xF0\x9F\x94\x8C Placa a pornit (v" VERSIUNE "). Motiv: " + repMotiv + ".");   // 🔌
     }
+    if (modSigur)   // 🛟
+      tg(String("\xF0\x9F\x9B\x9F Placa a pornit în mod sigur: s-a blocat de ") + String(smSir) + " ori la " + PAS_NUME[smPas] +
+         ", așa că acum sare peste ea." + (smPas == 20 ? " Ceața și ventilatorul stau oprite; lumina, pompa și ploaia merg după program." : "") +
+         " După ce rezolvi cauza, deschide pagina și apasă Repornește normal.");
   }
 #endif
   eraConectat = conectat;
@@ -1698,7 +1785,7 @@ void loop() {
   if (millis() - tSenzor > 2000) {
     tSenzor = millis();
     PAS(20);
-    float t = citesteTemp(), h = citesteUmid();
+    float t = smSari(20) ? NAN : citesteTemp(), h = smSari(20) ? NAN : citesteUmid();
     static int esecuri = 0;
     if (isnan(t) || isnan(h)) {
       // o citire esuata ocazionala e normala (mai ales la DHT22): o ignoram
@@ -1710,7 +1797,7 @@ void loop() {
     PAS(23);
     {   // 1.9.1: apa (medie usoara, ca sa nu sara cifrele)
       static int esecA = 0;
-      float ta = apaCiteste();
+      float ta = smSari(23) ? NAN : apaCiteste();
       if (isnan(ta)) { if (++esecA >= 5) tApa = NAN; }
       else { esecA = 0; tApa = isnan(tApa) ? ta : tApa * 0.8f + ta * 0.2f; }
     }
@@ -1718,7 +1805,7 @@ void loop() {
     umBlocatVerifica();
     noapteAdauga();
     esp_task_wdt_reset();
-    if ((histCount == 0 && !isnan(temp)) || (histCount > 0 && millis() - tHist >= 300000UL)) {
+    if (!smSari(22) && ((histCount == 0 && !isnan(temp)) || (histCount > 0 && millis() - tHist >= 300000UL))) {
       PAS(22);
       tHist = millis();
       inregistreaza();
@@ -1726,9 +1813,9 @@ void loop() {
     }
     PAS(21);
 #if SENZOR_LED_NTC
-    float tl = citesteNtc();
+    float tl = smSari(21) ? NAN : citesteNtc();
 #else
-    float tl = dsCiteste();
+    float tl = smSari(21) ? NAN : dsCiteste();
 #endif
     // 1.9.0: citirile imposibile nu conteaza (un pin fara senzor culege zgomot care poate arata ca o temperatura)
     static int esecL = 0, salt = 0;
@@ -1747,7 +1834,7 @@ void loop() {
     caldVerifica();
     logica();
 #if FOLOSESTE_TELEGRAM
-    PAS(19); verificaAlerte();
+    PAS(19); if (!smSari(19)) verificaAlerte();
 #endif
     PAS(0);
   }

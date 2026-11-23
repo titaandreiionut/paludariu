@@ -35,6 +35,28 @@ final class Ui {
         w.setNavigationBarColor(BG);
     }
 
+    /** 1.9.2: barele telefonului iau culoarea temei din pagina; pe fundal deschis (tema „Zi”) iconitele devin inchise. */
+    @SuppressWarnings("deprecation")
+    static void themeBars(Activity a, int color) {
+        Window w = a.getWindow();
+        w.setStatusBarColor(color);
+        w.setNavigationBarColor(color);
+        double lum = (0.299 * ((color >> 16) & 0xFF) + 0.587 * ((color >> 8) & 0xFF) + 0.114 * (color & 0xFF)) / 255.0;
+        boolean light = lum > 0.6;
+        android.view.View d = w.getDecorView();
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            android.view.WindowInsetsController c = w.getInsetsController();
+            if (c != null) {
+                int m = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                c.setSystemBarsAppearance(light ? m : 0, m);
+            }
+        } else {
+            int f = d.getSystemUiVisibility();
+            int m = android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | (android.os.Build.VERSION.SDK_INT >= 26 ? android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR : 0);
+            d.setSystemUiVisibility(light ? (f | m) : (f & ~m));
+        }
+    }
+
     static GradientDrawable round(int fill, int stroke, float radiusDp, Context c) {
         GradientDrawable g = new GradientDrawable();
         g.setColor(fill);
@@ -64,7 +86,7 @@ final class Ui {
 
     static TextView title(Context c, String s, float sp) {
         TextView t = text(c, s, sp, TXT, false);
-        t.setTypeface(Typeface.create(Typeface.SERIF, Typeface.BOLD));
+        t.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));   // 1.9.2: titlurile cu fontul telefonului, ca textul
         return t;
     }
 

@@ -263,6 +263,7 @@ Rasp apiCerere(const String& cale) {
   if (p == "/opt") return apiOpt(a);
   if (p == "/hran") return apiHran(a);
   if (p == "/fan") return apiFan(a);
+  if (p == "/safe") return apiSafe(a);
   if (p == "/noapte") return apiNoapte(a);
   if (p == "/privit") return apiPrivit(a, false);
 #if FOLOSESTE_TELEGRAM
